@@ -21,10 +21,17 @@ if [[ -z "${iface_ip:-}" ]]; then
 fi
 
 echo "Using iface IP: ${iface_ip}"
-mkdir receiver_outputs
+
+# Extract last octet for filename, e.g. 10.169.144.16 → 16
+last_octet="${iface_ip##*.}"
+
+mkdir -p receiver_outputs
+
+out_file="receiver_outputs/r1.bin_${last_octet}"
+echo "Output file: ${out_file}"
 
 ./build/peel_receiver \
   --group 239.255.0.1 \
   --port 5000 \
-  --out receiver_outputs/r1.bin \
+  --out "${out_file}" \
   --iface "${iface_ip}"
