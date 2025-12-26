@@ -11,8 +11,8 @@ MpContext::MpContext(int rank, int size)
     : rank_(rank), size_(size), conns_(size) {}
 
 std::shared_ptr<MpContext> MpContext::create(
-    const std::shared_ptr<::gloo::Context>& ctx,
-    const std::shared_ptr<rendezvous::Store>& store) {
+    const std::shared_ptr<gloo::Context>& ctx,
+    const std::shared_ptr<gloo::Store>& store) {
   if (!ctx) {
     throw std::invalid_argument("MpContext::create: ctx is null");
   }
@@ -47,7 +47,7 @@ MpConnection& MpContext::connectionForRoot(int root) {
 
 void MpContext::initConnectionForRoot(
     int root,
-    const std::shared_ptr<rendezvous::Store>& store) {
+    const std::shared_ptr<gloo::Store>& store) {
   MpConnection conn;
   conn.root = root;
   conn.isSender = (rank_ == root);

@@ -1,12 +1,11 @@
 // mp_context.h
 #pragma once
 
-#include <memory>
 #include <string>
 #include <vector>
 
-#include "gloo/context.h"
-#include "gloo/rendezvous/store.h"
+#include "context.h"
+#include "store.h"
 
 namespace gloo {
 namespace transport {
@@ -50,8 +49,8 @@ class MpContext {
   MpConnection& connectionForRoot(int root);
 
   static std::shared_ptr<MpContext> create(
-      const std::shared_ptr<::gloo::Context>& ctx,
-      const std::shared_ptr<rendezvous::Store>& store);
+      const std::shared_ptr<gloo::Context>& ctx,
+      const std::shared_ptr<gloo::Store>& store);
 
  private:
   int rank_;
@@ -59,7 +58,7 @@ class MpContext {
   std::vector<MpConnection> conns_;
 
   void initConnectionForRoot(int root,
-                             const std::shared_ptr<rendezvous::Store>& store);
+                             const std::shared_ptr<gloo::Store>& store);
 };
 
 } // namespace mp
