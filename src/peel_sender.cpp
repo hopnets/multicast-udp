@@ -216,8 +216,13 @@ public:
 
 private:
     bool handshake() {
-        // Measure total handshake time (ms)
-        uint32_t handshake_start_ms = now_ms();
+        // High-resolution start time
+        auto handshake_start = Clock::now();
+        auto elapsed_us = [&]() -> long long {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now() - handshake_start
+            ).count();
+        };
 
         std::unordered_map<PeerKey, sockaddr_in, PeerKeyHash> cohort_map; // by (ip,port) from recvfrom
         int retries = 0;
@@ -227,14 +232,16 @@ private:
             std::vector<uint8_t> pkt(sizeof(RmHeader));
             serialize_header(h, pkt.data());
             if (!xmit(pkt)) {
-                uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+                auto us = elapsed_us();
+                double ms = us / 1000.0;
                 std::cerr << "Handshake failed while sending SYN after "
-                          << elapsed_ms << " ms\n";
+                          << us << " us (" << ms << " ms)\n";
                 return false;
             }
 
             // Verbose logging disabled for timing
-            // std::cerr << "SYN -> group (try " << (retries+1) << "/" << (A.retries+1) << ")\n";
+            // std::cerr << "SYN -> group (try " << (retries+1)
+            //           << "/" << (A.retries+1) << ")\n";
 
             auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
             while (Clock::now() < deadline) {
@@ -256,9 +263,11 @@ private:
         }
 
         if ((int)cohort_map.size() < A.expected) {
-            uint32_t elapsed_ms = now_ms() - handshake_start_ms;
-            std::cerr << "Handshake failed after " << elapsed_ms << " ms: got "
-                      << cohort_map.size() << "/" << A.expected << " receivers\n";
+            auto us = elapsed_us();
+            double ms = us / 1000.0;
+            std::cerr << "Handshake failed after " << us << " us ("
+                      << ms << " ms): got " << cohort_map.size()
+                      << "/" << A.expected << " receivers\n";
             return false;
         }
 
@@ -272,18 +281,23 @@ private:
         std::vector<uint8_t> pkt(sizeof(RmHeader));
         serialize_header(start, pkt.data());
         if (!xmit(pkt)) {
-            uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+            auto us = elapsed_us();
+            double ms = us / 1000.0;
             std::cerr << "Handshake failed while sending START after "
-                      << elapsed_ms << " ms (cohort size=" << cohort.size() << ")\n";
+                      << us << " us (" << ms << " ms), cohort size="
+                      << cohort.size() << "\n";
             return false;
         }
 
-        uint32_t elapsed_ms = now_ms() - handshake_start_ms;
-        std::cerr << "Handshake complete in " << elapsed_ms
-                  << " ms. Cohort size=" << cohort.size() << ". Sent START.\n";
+        auto us = elapsed_us();
+        double ms = us / 1000.0;
+        std::cerr << "Handshake complete in " << us << " us ("
+                  << ms << " ms). Cohort size=" << cohort.size()
+                  << ". Sent START.\n";
 
         return true;
     }
+
 
 
     bool send_file(const std::string& path) {
