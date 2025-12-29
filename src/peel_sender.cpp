@@ -216,6 +216,9 @@ public:
 
 private:
     bool handshake() {
+        // Measure total handshake time (ms)
+        uint32_t handshake_start_ms = now_ms();
+
         std::unordered_map<PeerKey, sockaddr_in, PeerKeyHash> cohort_map; // by (ip,port) from recvfrom
         int retries = 0;
         while (retries <= A.retries) {
@@ -223,8 +226,15 @@ private:
             RmHeader h{}; fill_header(h, /*seq*/0, FLG_SYN, /*wnd*/1, ts, /*tsecr*/0);
             std::vector<uint8_t> pkt(sizeof(RmHeader));
             serialize_header(h, pkt.data());
-            if (!xmit(pkt)) return false;
-            std::cerr << "SYN -> group (try " << (retries+1) << "/" << (A.retries+1) << ")\n";
+            if (!xmit(pkt)) {
+                uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+                std::cerr << "Handshake failed while sending SYN after "
+                          << elapsed_ms << " ms\n";
+                return false;
+            }
+
+            // Verbose logging disabled for timing
+            // std::cerr << "SYN -> group (try " << (retries+1) << "/" << (A.retries+1) << ")\n";
 
             auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
             while (Clock::now() < deadline) {
@@ -236,28 +246,45 @@ private:
                 PeerKey k{ peer.sin_addr.s_addr, peer.sin_port };
                 if (!cohort_map.count(k)) {
                     cohort_map[k] = peer;
-                    std::cerr << "  SYN|ACK from " << addr_to_string(peer) << " (" << cohort_map.size() << "/" << A.expected << ")\n";
+                    // std::cerr << "  SYN|ACK from " << addr_to_string(peer)
+                    //           << " (" << cohort_map.size() << "/" << A.expected << ")\n";
                 }
                 if ((int)cohort_map.size() >= A.expected) break;
             }
             if ((int)cohort_map.size() >= A.expected) break; // success
             ++retries;
         }
+
         if ((int)cohort_map.size() < A.expected) {
-            std::cerr << "Handshake failed: got " << cohort_map.size() << "/" << A.expected << " receivers\n"; return false;
+            uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+            std::cerr << "Handshake failed after " << elapsed_ms << " ms: got "
+                      << cohort_map.size() << "/" << A.expected << " receivers\n";
+            return false;
         }
+
         // Solidify cohort
         cohort.clear(); cohort.reserve(cohort_map.size());
         for (auto& kv : cohort_map) cohort.push_back(kv.second);
+
         // Inform cohort: START (multicast)
         uint32_t ts = now_ms();
         RmHeader start{}; fill_header(start, /*seq*/0, FLG_START, /*wnd*/1, ts, 0);
         std::vector<uint8_t> pkt(sizeof(RmHeader));
         serialize_header(start, pkt.data());
-        if (!xmit(pkt)) return false;
-        std::cerr << "Handshake complete. Cohort size=" << cohort.size() << ". Sent START.\n";
+        if (!xmit(pkt)) {
+            uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+            std::cerr << "Handshake failed while sending START after "
+                      << elapsed_ms << " ms (cohort size=" << cohort.size() << ")\n";
+            return false;
+        }
+
+        uint32_t elapsed_ms = now_ms() - handshake_start_ms;
+        std::cerr << "Handshake complete in " << elapsed_ms
+                  << " ms. Cohort size=" << cohort.size() << ". Sent START.\n";
+
         return true;
     }
+
 
     bool send_file(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
