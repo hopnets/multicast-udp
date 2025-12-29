@@ -30,6 +30,9 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <optional>
+#include <cassert>
+#include <atomic>
 
 #include <chrono>
 #include <cstdint>
@@ -37,16 +40,109 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <list>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
+
+/* template<typename T>
+
+class mpmc_bounded_queue
+{
+public:
+  explicit mpmc_bounded_queue(size_t buffer_size)
+    : buffer_(new cell_t [buffer_size])
+    , buffer_mask_(buffer_size - 1)
+  {
+    assert((buffer_size >= 2) &&
+      ((buffer_size & (buffer_size - 1)) == 0));
+    for (size_t i = 0; i != buffer_size; i += 1)
+      buffer_[i].sequence_.store(i, std::memory_order_relaxed);
+    enqueue_pos_.store(0, std::memory_order_relaxed);
+    dequeue_pos_.store(0, std::memory_order_relaxed);
+  }
+  ~mpmc_bounded_queue()
+  {
+    delete [] buffer_;
+  }
+  bool enqueue(T const& data)
+  {
+    cell_t* cell;
+    size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+      cell = &buffer_[pos & buffer_mask_];
+      const size_t seq =
+        cell->sequence_.load(std::memory_order_acquire);
+      if (intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos); dif == 0)
+      {
+        if (enqueue_pos_.compare_exchange_weak
+            (pos, pos + 1, std::memory_order_relaxed))
+          break;
+      }
+      else if (dif < 0)
+        return false;
+      else
+        pos = enqueue_pos_.load(std::memory_order_relaxed);
+    }
+    cell->data_ = data;
+    cell->sequence_.store(pos + 1, std::memory_order_release);
+    return true;
+  }
+  bool dequeue(T& data)
+  {
+    cell_t* cell;
+    size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+    for (;;)
+    {
+      cell = &buffer_[pos & buffer_mask_];
+      const size_t seq =
+        cell->sequence_.load(std::memory_order_acquire);
+      if (const intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1); dif == 0)
+      {
+        if (dequeue_pos_.compare_exchange_weak
+            (pos, pos + 1, std::memory_order_relaxed))
+          break;
+      }
+        else if (dif < 0)
+        return false;
+      else
+        pos = dequeue_pos_.load(std::memory_order_relaxed);
+    }
+    data = cell->data_;
+    cell->sequence_.store
+      (pos + buffer_mask_ + 1, std::memory_order_release);
+    return true;
+  }
+private:
+  struct cell_t
+  {
+    std::atomic<size_t>   sequence_;
+    T                     data_;
+  };
+  static size_t const     cacheline_size = 64;
+  typedef char            cacheline_pad_t [cacheline_size];
+  cacheline_pad_t         pad0_{};
+  cell_t* const           buffer_;
+  size_t const            buffer_mask_;
+  cacheline_pad_t         pad1_{};
+  std::atomic<size_t>     enqueue_pos_;
+  cacheline_pad_t         pad2_{};
+  std::atomic<size_t>     dequeue_pos_;
+  cacheline_pad_t         pad3_{};
+  mpmc_bounded_queue(mpmc_bounded_queue const&);
+  void operator = (mpmc_bounded_queue const&);
+}; */
 
 // ---------------- Protocol header (20 bytes) ----------------
 #pragma pack(push, 1)
@@ -127,6 +223,14 @@ struct Args {
     size_t max_app_payload = 1452;      // default for Ethernet MTU (1472 total - 20 header)
 };
 
+struct WindowEntry {
+	std::vector<uint8_t> contents;
+	bool ack_status = false;
+    uint32_t sequence_number;
+    uint64_t last_retry;
+    int num_tries;
+};
+
 static void usage(const char* prog) {
     std::cerr << "Usage: " << prog << " --group A.B.C.D --port P --sender-port S --expected N [--file path]"
               << " [--iface X.Y.Z.W] [--ttl T] [--rto-ms MS] [--retries K] [--chunk BYTES]\n";
@@ -179,7 +283,7 @@ public:
         }
         if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &A.ttl, sizeof(A.ttl)) < 0) {
             perror("setsockopt IP_MULTICAST_TTL"); return false; }
-        int loop = 0; // avoid receiving our own multicast on this socket
+        int loop = 1; // was 0 with comment: avoid receiving our own multicast on this socket
         if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
             perror("setsockopt IP_MULTICAST_LOOP"); return false; }
 
@@ -214,6 +318,119 @@ public:
         return send_fin(seq++);
     }
 
+    // consider renaming
+    bool run_windowed() {
+        // this implementation will use a std::vector for now
+        // it can later use a Dmitry Vyukov queue
+        auto cwnd = 10;
+        if (!handshake()) return false;
+        if (!A.file.empty()) return send_file_windowed(A.file);
+        uint32_t seq = 1;
+
+        std::cerr << "handshake successful, entering data transmission" << std::endl;
+        // auto window = new mpsc_bounded_queue<WindowEntry>(cwnd);
+
+        // creating a window of packets
+        std::mutex mutex;
+        auto window = new std::vector<WindowEntry>();
+        for (int i = 0; i < cwnd; i++) {
+            auto contents = std::vector<uint8_t>();
+            contents.push_back('t');
+            contents.push_back('e');
+            contents.push_back('s');
+            contents.push_back('t');
+            window->push_back(WindowEntry{contents, false, seq++,0,0});
+        }
+        std::cerr << "created dummy data" << std::endl;
+        bool halt = false;
+        auto seqs_to_timestamps_sent = std::map<uint32_t, uint64_t>();
+
+        // sending packets all at once and waiting for ACKs
+        // thread 1 (listenthread): listen for ACKs and mutate the ack statuses
+        std::thread listener(&PeelSender::listenthread, this, window, &seqs_to_timestamps_sent, &halt, &mutex);
+        // thread 2 (sendthread) (in this function): send all the packets, then exit
+        // thread 3: (remthread) removing the first entry if its ack status is true
+        std::thread remover(remthread, window, &mutex);
+
+        std::cerr << "created listener and remover threads" << std::endl;
+
+        // sending packets: all at once with retries for each
+        uint64_t retry_delay = 10;
+        while (!halt) {
+            std::cerr << "trying from the top of the while loop in run_windowed" << std::endl;
+            auto num_not_retrying = 0;
+            auto acked = 0;
+            mutex.lock();
+            for (int window_index = 0; window_index < window->size(); ++window_index) {
+                if (static_cast<uint64_t>(now_ms()) - (*window)[window_index].last_retry < retry_delay) {
+                    mutex.unlock();
+                    continue;
+                }
+                if ((*window)[window_index].ack_status == true) {
+                    mutex.unlock();
+                    acked++;
+                    continue;
+                }
+                if ((*window)[window_index].num_tries > A.retries) {
+                    num_not_retrying++;
+                    mutex.unlock();
+                    continue;
+                }
+                auto app = (*window)[window_index].contents;
+                 // is this a good idea, the double lock/unlock?
+                uint32_t ts = now_ms();
+                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+                RmHeader h{}; fill_header(h, (*window)[window_index].sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
+                serialize_header(h, pkt.data());
+                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+                if (!xmit(pkt)) return false; // failed to transmit window
+
+                std::cerr << "DATA seq=" << (*window)[window_index].sequence_number << " len=" << app.size() << " (try " << ((*window)[window_index].num_tries+1) << ")\n";
+                (*window)[window_index].num_tries++;
+            }
+            mutex.unlock();
+            if (num_not_retrying == window->size()) {
+                std::cerr << "Failed to deliver DATA seq=" << seq << " after retries\n";
+                return false;
+            }
+            if (window->empty()) { // because of acks being sent
+                return true;
+            }
+        }
+
+        // cleanup
+        delete window;
+        return true;
+    }
+    static void remthread(std::vector<WindowEntry> *v, std::mutex *m) {
+        std::cerr << "entering remthread" << std::endl;
+        while (v->empty() != true) {
+            const auto& first = v->front();
+            if (first.ack_status == true) {
+                m->lock();
+                v->pop_back();
+                m->unlock();
+                std::cerr << "remthread: popping back because of ack status true" << std::endl;
+            }
+        }
+    }
+    void listenthread(std::vector<WindowEntry> *l, std::map<uint32_t, uint64_t> *seqs_to_timestamps_sent, bool *halt, std::mutex *m) {
+        // listens for ACKs for all sequence numbers provided
+        std::cerr << "entering listenthread" << std::endl;
+        while (!*halt) {
+            auto [res, seq] = wait_for_ack(seqs_to_timestamps_sent);
+            if (res) {
+                for (long unsigned int i = 0; i < l->size(); i++) {
+                    if ((*l)[i].sequence_number == seq) {
+                        std::cerr << "listenthread: received ack for seq number" << seq << std::endl;
+                        m->lock();
+                        (*l)[i].ack_status = true;
+                        m->unlock();
+                    }
+                }
+            }
+        }
+    }
 private:
     bool handshake() {
         std::unordered_map<PeerKey, sockaddr_in, PeerKeyHash> cohort_map; // by (ip,port) from recvfrom
@@ -274,6 +491,14 @@ private:
         return send_fin(seq++);
     }
 
+    bool send_file_windowed(const std::string& path) {
+        std::cerr << "file given, sending file with window-based transmission" << std::endl;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) { std::cerr << "Failed to open file: " << path << "\n"; return false; }
+        uint32_t seq = 1;
+        std::vector<uint8_t> buf(A.max_app_payload);
+    }
+
     bool send_data(uint32_t seq, const std::vector<uint8_t>& app) {
         for (int attempt = 0; attempt <= A.retries; ++attempt) {
             uint32_t ts = now_ms();
@@ -330,6 +555,30 @@ private:
             if (got.size() >= cohort.size()) return true;
         }
         return false;
+    }
+    std::tuple<bool, uint32_t> wait_for_ack(std::map<uint32_t, uint64_t> *seq_to_timestamps_sent) {
+        std::unordered_set<uint64_t> got; got.reserve(cohort.size()*2);
+        auto pack_key = [](const sockaddr_in& a){ return (uint64_t)a.sin_addr.s_addr << 16 | ntohs(a.sin_port); };
+        auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
+        while (Clock::now() < deadline) {
+            sockaddr_in peer{}; RmHeader rh{};
+            if (!recv_header(peer, rh)) break; // timeout -> break to trigger retransmit by caller
+            if (!verify_header(rh)) continue;
+            if ((ntohs(rh.flags) & FLG_ACK) == 0) continue;
+            // We require ack.seq == our seq and rh.tsecr == ts_sent
+            uint32_t seq = ntohl(rh.seq);
+            // omitted temporarily
+            // if (ntohl(rh.tsecr) != seq_to_timestamps_sent->find(seq)) continue;
+            // Check that peer is part of cohort
+            bool member = false;
+            for (auto& c : cohort) {
+                if (c.sin_addr.s_addr == peer.sin_addr.s_addr && c.sin_port == peer.sin_port) { member = true; break; }
+            }
+            if (!member) continue; // ignore unknown
+            got.insert(pack_key(peer));
+            if (got.size() >= cohort.size()) return std::tuple<bool,uint32_t>(true, seq);
+        }
+        return std::tuple<bool,uint32_t>(false, 0);
     }
 
     bool xmit(const std::vector<uint8_t>& bytes) {
@@ -396,6 +645,6 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 1;
     PeelSender s(args);
     if (!s.init()) return 2;
-    if (!s.run()) return 3;
+    if (!s.run_windowed()) return 3;
     return 0;
 }

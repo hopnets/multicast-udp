@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IP_PREFIX="10.169.144."
+#IP_PREFIX="10.169.144."
+IP_PREFIX="192.168.1."
 
 # Find the first IPv4 address on this host that starts with 10.169.144.
 iface_ip=$(

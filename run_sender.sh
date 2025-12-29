@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IP_PREFIX="10.169.144."
+#IP_PREFIX="10.169.144."
+IP_PREFIX="192.168.1."
 
 # -------------------------------
 # Parse command-line arguments
@@ -45,9 +46,9 @@ echo "Using iface IP     : ${iface_ip}"
   --port 5000 \
   --sender-port 45000 \
   --expected "${expected}" \
-  --file "${payload_file}" \
   --ttl 1 \
   --rto-ms 250 \
   --retries 20 \
   --chunk 1452 \
   --iface "${iface_ip}"
+#--file "${payload_file}" \

@@ -48,7 +48,7 @@ struct RmHeader {
     uint32_t tsval;      // Sender timestamp (network order)
     uint32_t tsecr;      // Echo timestamp (network order)
 };
-#pragma pack(pop)
+#pragma pack(pop)1
 static_assert(sizeof(RmHeader) == 20, "RmHeader must be 20 bytes");
 
 enum : uint16_t {
