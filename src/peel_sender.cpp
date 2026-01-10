@@ -256,7 +256,7 @@ public:
 
         // storing retries for all packets
         auto attempts = 0;
-        bool halt = false;
+        std::atomic<bool> halt{false};
         std::mutex mutex;
         // while the window is not empty:
         std::thread ackthread(run_windowed_twothreaded_ackthread, this, &window, &mutex, &halt);
@@ -277,8 +277,11 @@ public:
                 RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
                 serialize_header(h, pkt.data());
                 if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
-                if (!xmit(pkt)) return false; // failed to transmit window
-
+                if (!xmit(pkt)) {
+                    halt = true;
+                    ackthread.join();
+                    return false; // failed to transmit window
+                }
                 std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
             }
             mutex.unlock();
@@ -287,18 +290,14 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
             attempts++;
         }
-        mutex.lock();
         halt = true;
-        mutex.unlock();
         ackthread.join();
     }
 
-    static void run_windowed_twothreaded_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, bool *halt) {
+    static void run_windowed_twothreaded_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt) {
         while (true) {
             // loop condition
-            mutex->lock();
             const bool halting = *halt;
-            mutex->unlock();
             if (halting) {
                 break;
             }
@@ -308,7 +307,7 @@ public:
                 mutex->lock();
                 for (auto it = window->begin(); it != window->end(); it++) {
                     if ((*it).sequence_number == seq) {
-                        std::cerr << "listen: received ack for seq number" << seq << std::endl;
+                        std::cerr << "listen: received ack for seq number " << seq << std::endl;
                         (*it).ack_status = true;
                     }
                 }
