@@ -55,95 +55,6 @@
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-/* template<typename T>
-
-class mpmc_bounded_queue
-{
-public:
-  explicit mpmc_bounded_queue(size_t buffer_size)
-    : buffer_(new cell_t [buffer_size])
-    , buffer_mask_(buffer_size - 1)
-  {
-    assert((buffer_size >= 2) &&
-      ((buffer_size & (buffer_size - 1)) == 0));
-    for (size_t i = 0; i != buffer_size; i += 1)
-      buffer_[i].sequence_.store(i, std::memory_order_relaxed);
-    enqueue_pos_.store(0, std::memory_order_relaxed);
-    dequeue_pos_.store(0, std::memory_order_relaxed);
-  }
-  ~mpmc_bounded_queue()
-  {
-    delete [] buffer_;
-  }
-  bool enqueue(T const& data)
-  {
-    cell_t* cell;
-    size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
-    for (;;)
-    {
-      cell = &buffer_[pos & buffer_mask_];
-      const size_t seq =
-        cell->sequence_.load(std::memory_order_acquire);
-      if (intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos); dif == 0)
-      {
-        if (enqueue_pos_.compare_exchange_weak
-            (pos, pos + 1, std::memory_order_relaxed))
-          break;
-      }
-      else if (dif < 0)
-        return false;
-      else
-        pos = enqueue_pos_.load(std::memory_order_relaxed);
-    }
-    cell->data_ = data;
-    cell->sequence_.store(pos + 1, std::memory_order_release);
-    return true;
-  }
-  bool dequeue(T& data)
-  {
-    cell_t* cell;
-    size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
-    for (;;)
-    {
-      cell = &buffer_[pos & buffer_mask_];
-      const size_t seq =
-        cell->sequence_.load(std::memory_order_acquire);
-      if (const intptr_t dif = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1); dif == 0)
-      {
-        if (dequeue_pos_.compare_exchange_weak
-            (pos, pos + 1, std::memory_order_relaxed))
-          break;
-      }
-        else if (dif < 0)
-        return false;
-      else
-        pos = dequeue_pos_.load(std::memory_order_relaxed);
-    }
-    data = cell->data_;
-    cell->sequence_.store
-      (pos + buffer_mask_ + 1, std::memory_order_release);
-    return true;
-  }
-private:
-  struct cell_t
-  {
-    std::atomic<size_t>   sequence_;
-    T                     data_;
-  };
-  static size_t const     cacheline_size = 64;
-  typedef char            cacheline_pad_t [cacheline_size];
-  cacheline_pad_t         pad0_{};
-  cell_t* const           buffer_;
-  size_t const            buffer_mask_;
-  cacheline_pad_t         pad1_{};
-  std::atomic<size_t>     enqueue_pos_;
-  cacheline_pad_t         pad2_{};
-  std::atomic<size_t>     dequeue_pos_;
-  cacheline_pad_t         pad3_{};
-  mpmc_bounded_queue(mpmc_bounded_queue const&);
-  void operator = (mpmc_bounded_queue const&);
-}; */
-
 // ---------------- Protocol header (20 bytes) ----------------
 #pragma pack(push, 1)
 struct RmHeader {
@@ -318,6 +229,171 @@ public:
         return send_fin(seq++);
     }
 
+    bool send_file_windowed_twothreaded(std::string file) {
+        return false;
+    }
+
+    bool run_windowed_twothreaded() {
+        // separate thread for receiving acks
+        auto cwnd = 10;
+        if (!handshake()) return false;
+        if (!A.file.empty()) return send_file_windowed_twothreaded(A.file);
+        uint32_t seq = 1;
+
+        std::cerr << "handshake successful, entering data transmission" << std::endl;
+
+        // init the window with the data
+        std::list window = std::list<WindowEntry>();
+
+        for (int i = 0; i < cwnd; i++) {
+            auto contents = std::vector<uint8_t>();
+            contents.push_back('t');
+            contents.push_back('e');
+            contents.push_back('s');
+            contents.push_back('t');
+            window.push_back(WindowEntry{contents, false, seq++,0,0});
+        }
+
+        // storing retries for all packets
+        auto attempts = 0;
+        bool halt = false;
+        std::mutex mutex;
+        // while the window is not empty:
+        std::thread ackthread(run_windowed_twothreaded_ackthread, this, &window, &mutex, &halt);
+
+        while (attempts < A.retries) {
+            // attempt to send each packet in the window if it isn't flagged as sent
+            mutex.lock();
+            auto empty = window.empty();
+            if (empty) {
+                mutex.unlock();
+                break;
+            }
+
+            for (auto it = window.begin(); it != window.end(); it++) {
+                auto app =  (*it).contents;
+                uint32_t ts = now_ms();
+                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+                RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
+                serialize_header(h, pkt.data());
+                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+                if (!xmit(pkt)) return false; // failed to transmit window
+
+                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
+            }
+            mutex.unlock();
+            // wait the retry duration
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
+            attempts++;
+        }
+        mutex.lock();
+        halt = true;
+        mutex.unlock();
+        ackthread.join();
+    }
+
+    static void run_windowed_twothreaded_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, bool *halt) {
+        while (true) {
+            // loop condition
+            mutex->lock();
+            const bool halting = *halt;
+            mutex->unlock();
+            if (halting) {
+                break;
+            }
+            // listen for acks and flag as acked
+            auto [res, seq] = p->wait_for_ack();
+            if (res) {
+                mutex->lock();
+                for (auto it = window->begin(); it != window->end(); it++) {
+                    if ((*it).sequence_number == seq) {
+                        std::cerr << "listen: received ack for seq number" << seq << std::endl;
+                        (*it).ack_status = true;
+                    }
+                }
+                // clean up the window, if empty, break
+                while (!window->empty()) {
+                    auto front = window->front();
+                    if (front.ack_status != true) {
+                        break;
+                    }
+                    window->pop_front();
+                    std::cerr << "remove: popping back because of ack status true" << std::endl;
+                }
+                mutex->unlock();
+            }
+        }
+    }
+
+
+    bool run_windowed_singlethreaded() {
+        auto cwnd = 10;
+        if (!handshake()) return false;
+        if (!A.file.empty()) return send_file_windowed_singlethreaded(A.file);
+        uint32_t seq = 1;
+
+        std::cerr << "handshake successful, entering data transmission" << std::endl;
+
+        // init the window with the data
+        std::list window = std::list<WindowEntry>();
+
+        for (int i = 0; i < cwnd; i++) {
+            auto contents = std::vector<uint8_t>();
+            contents.push_back('t');
+            contents.push_back('e');
+            contents.push_back('s');
+            contents.push_back('t');
+            window.push_back(WindowEntry{contents, false, seq++,0,0});
+        }
+
+        // storing retries for all packets
+        auto attempts = 0;
+        // while the window is not empty:
+
+        while (!window.empty() and attempts < A.retries) {
+            // attempt to send each packet in the window if it isn't flagged as sent
+            for (auto it = window.begin(); it != window.end(); it++) {
+                auto app =  (*it).contents;
+                uint32_t ts = now_ms();
+                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+                RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
+                serialize_header(h, pkt.data());
+                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+                if (!xmit(pkt)) return false; // failed to transmit window
+
+                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
+            }
+            attempts++;
+
+            // for the retry duration:
+
+            auto listen_start_time = now_ms();
+            while (now_ms() - listen_start_time < A.rto_ms) {
+                // listen for acks and flag as acked
+                auto [res, seq] = wait_for_ack();
+                if (res) {
+                    for (auto it = window.begin(); it != window.end(); it++) {
+                        if ((*it).sequence_number == seq) {
+                            std::cerr << "listen: received ack for seq number" << seq << std::endl;
+                            (*it).ack_status = true;
+                        }
+                    }
+                    // clean up the window, if empty, break
+                    const auto& first = window.front();
+                    if (first.ack_status == true) {
+                        window.pop_front();
+                        std::cerr << "remove: popping back because of ack status true" << std::endl;
+                    }
+                }
+            }
+        }
+    }
+
+    bool send_file_windowed_singlethreaded(std::string file) {
+
+    }
+
     // consider renaming
     bool run_windowed() {
         // this implementation will use a std::vector for now
@@ -418,7 +494,7 @@ public:
         // listens for ACKs for all sequence numbers provided
         std::cerr << "entering listenthread" << std::endl;
         while (!*halt) {
-            auto [res, seq] = wait_for_ack(seqs_to_timestamps_sent);
+            auto [res, seq] = wait_for_ack();
             if (res) {
                 for (long unsigned int i = 0; i < l->size(); i++) {
                     if ((*l)[i].sequence_number == seq) {
@@ -556,7 +632,7 @@ private:
         }
         return false;
     }
-    std::tuple<bool, uint32_t> wait_for_ack(std::map<uint32_t, uint64_t> *seq_to_timestamps_sent) {
+    std::tuple<bool, uint32_t> wait_for_ack() {
         std::unordered_set<uint64_t> got; got.reserve(cohort.size()*2);
         auto pack_key = [](const sockaddr_in& a){ return (uint64_t)a.sin_addr.s_addr << 16 | ntohs(a.sin_port); };
         auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
@@ -645,6 +721,6 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 1;
     PeelSender s(args);
     if (!s.init()) return 2;
-    if (!s.run_windowed()) return 3;
+    if (!s.run_windowed_twothreaded()) return 3;
     return 0;
 }

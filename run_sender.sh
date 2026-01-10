@@ -2,7 +2,8 @@
 set -euo pipefail
 
 #IP_PREFIX="10.169.144."
-IP_PREFIX="192.168.1."
+#IP_PREFIX="192.168.1."
+IP_PREFIX="10.223.180."
 
 # -------------------------------
 # Parse command-line arguments
