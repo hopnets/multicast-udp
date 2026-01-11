@@ -48,19 +48,21 @@
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 
-// ---------------- Protocol header (20 bytes) ----------------
+// ---------------- Protocol header (22 bytes) ----------------
 #pragma pack(push, 1)
 struct RmHeader {
     uint32_t seq;        // Sequence Number
     uint16_t src_port;   // Sender's UDP port (network order)
     uint16_t flags;      // Bit flags
+    uint8_t  retrans_id; // Retransmission attempt id (1..8)
+    uint8_t  reserved;   // Must be zero (keeps header length even)
     uint16_t window;     // Window size (for future use)
     uint16_t checksum;   // Internet checksum (header only, checksum field = 0 when computing)
     uint32_t tsval;      // Sender timestamp (ms, monotonic truncated)
     uint32_t tsecr;      // Echoed timestamp from peer (ACKs echo tsval)
 };
 #pragma pack(pop)
-static_assert(sizeof(RmHeader) == 20, "RmHeader must be 20 bytes");
+static_assert(sizeof(RmHeader) == 22, "RmHeader must be 22 bytes");
 
 // Flags
 enum : uint16_t {
@@ -124,7 +126,7 @@ struct Args {
     int ttl = 1;                        // multicast TTL
     int rto_ms = 250;                   // retransmission timeout
     int retries = 20;                   // max retries per step
-    size_t max_app_payload = 1452;      // default for Ethernet MTU (1472 total - 20 header)
+    size_t max_app_payload = 1450;      // default for Ethernet MTU (1472 total - 22 header)
 };
 
 static void usage(const char* prog) {
@@ -215,88 +217,96 @@ public:
     }
 
 private:
-    bool handshake() {
-        // High-resolution start time
-        auto handshake_start = Clock::now();
-        auto elapsed_us = [&]() -> long long {
-            return std::chrono::duration_cast<std::chrono::microseconds>(
-                Clock::now() - handshake_start
-            ).count();
-        };
+	bool handshake() {
+		// High-resolution start time
+		auto handshake_start = Clock::now();
+		auto elapsed_us = [&]() -> long long {
+			return std::chrono::duration_cast<std::chrono::microseconds>(
+				Clock::now() - handshake_start
+			).count();
+		};
 
-        std::unordered_map<PeerKey, sockaddr_in, PeerKeyHash> cohort_map; // by (ip,port) from recvfrom
-        int retries = 0;
-        while (retries <= A.retries) {
-            uint32_t ts = now_ms();
-            RmHeader h{}; fill_header(h, /*seq*/0, FLG_SYN, /*wnd*/1, ts, /*tsecr*/0);
-            std::vector<uint8_t> pkt(sizeof(RmHeader));
-            serialize_header(h, pkt.data());
-            if (!xmit(pkt)) {
-                auto us = elapsed_us();
-                double ms = us / 1000.0;
-                std::cerr << "Handshake failed while sending SYN after "
-                          << us << " us (" << ms << " ms)\n";
-                return false;
-            }
+		std::unordered_map<PeerKey, sockaddr_in, PeerKeyHash> cohort_map; // by (ip,port) from recvfrom
 
-            // Verbose logging disabled for timing
-            // std::cerr << "SYN -> group (try " << (retries+1)
-            //           << "/" << (A.retries+1) << ")\n";
+		constexpr uint8_t kMaxRetransId = 8;
+		bool success = false;
 
-            auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
-            while (Clock::now() < deadline) {
-                sockaddr_in peer{}; RmHeader rh{};
-                if (!recv_header(peer, rh)) break; // timeout or error -> break to maybe retransmit
-                if (!verify_header(rh)) continue;
-                if ((ntohs(rh.flags) & (FLG_SYN|FLG_ACK)) != (FLG_SYN|FLG_ACK)) continue; // need SYN|ACK
-                if (ntohl(rh.tsecr) != ts) continue; // must echo our ts
-                PeerKey k{ peer.sin_addr.s_addr, peer.sin_port };
-                if (!cohort_map.count(k)) {
-                    cohort_map[k] = peer;
-                    // std::cerr << "  SYN|ACK from " << addr_to_string(peer)
-                    //           << " (" << cohort_map.size() << "/" << A.expected << ")\n";
-                }
-                if ((int)cohort_map.size() >= A.expected) break;
-            }
-            if ((int)cohort_map.size() >= A.expected) break; // success
-            ++retries;
-        }
+		// NOTE: we cap handshake retransmissions by retrans_id (1..8), and we also respect --retries.
+		for (int attempt = 0, retrans_id = 1;
+			 attempt <= A.retries && retrans_id <= kMaxRetransId;
+			 ++attempt, ++retrans_id) {
 
-        if ((int)cohort_map.size() < A.expected) {
-            auto us = elapsed_us();
-            double ms = us / 1000.0;
-            std::cerr << "Handshake failed after " << us << " us ("
-                      << ms << " ms): got " << cohort_map.size()
-                      << "/" << A.expected << " receivers\n";
-            return false;
-        }
+			// A retransmission attempt starts a *new* ack-collection epoch.
+			// (User requirement: clear current received ACKs when retransmission triggers.)
+			if (attempt > 0) cohort_map.clear();
 
-        // Solidify cohort
-        cohort.clear(); cohort.reserve(cohort_map.size());
-        for (auto& kv : cohort_map) cohort.push_back(kv.second);
+			uint32_t ts = now_ms();
+			RmHeader h{}; fill_header(h, /*seq*/0, FLG_SYN, /*wnd*/1, ts, /*tsecr*/0, (uint8_t)retrans_id);
+			std::vector<uint8_t> pkt(sizeof(RmHeader));
+			serialize_header(h, pkt.data());
+			if (!xmit(pkt)) {
+				auto us = elapsed_us();
+				double ms = us / 1000.0;
+				std::cerr << "Handshake failed while sending SYN after "
+						  << us << " us (" << ms << " ms)\n";
+				return false;
+			}
 
-        // Inform cohort: START (multicast)
-        uint32_t ts = now_ms();
-        RmHeader start{}; fill_header(start, /*seq*/0, FLG_START, /*wnd*/1, ts, 0);
-        std::vector<uint8_t> pkt(sizeof(RmHeader));
-        serialize_header(start, pkt.data());
-        if (!xmit(pkt)) {
-            auto us = elapsed_us();
-            double ms = us / 1000.0;
-            std::cerr << "Handshake failed while sending START after "
-                      << us << " us (" << ms << " ms), cohort size="
-                      << cohort.size() << "\n";
-            return false;
-        }
+			auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
+			while (Clock::now() < deadline) {
+				sockaddr_in peer{}; RmHeader rh{};
+				if (!recv_header(peer, rh)) break; // timeout or error -> break to trigger retransmit
+				if (!verify_header(rh)) continue;
+				if ((ntohs(rh.flags) & (FLG_SYN | FLG_ACK)) != (FLG_SYN | FLG_ACK)) continue; // need SYN|ACK
+				if (rh.retrans_id != (uint8_t)retrans_id) continue; // ignore stale/early epochs
+				if (ntohl(rh.tsecr) != ts) continue; // must echo our ts
 
-        auto us = elapsed_us();
-        double ms = us / 1000.0;
-        std::cerr << "Handshake complete in " << us << " us ("
-                  << ms << " ms). Cohort size=" << cohort.size()
-                  << ". Sent START.\n";
+				PeerKey k{ peer.sin_addr.s_addr, peer.sin_port };
+				if (!cohort_map.count(k)) {
+					cohort_map[k] = peer;
+				}
+				if ((int)cohort_map.size() >= A.expected) break;
+			}
 
-        return true;
-    }
+			if ((int)cohort_map.size() >= A.expected) { success = true; break; }
+		}
+
+		if (!success || (int)cohort_map.size() < A.expected) {
+			auto us = elapsed_us();
+			double ms = us / 1000.0;
+			std::cerr << "Handshake failed after " << us << " us ("
+					  << ms << " ms): got " << cohort_map.size()
+					  << "/" << A.expected << " receivers\n";
+			return false;
+		}
+
+		// Solidify cohort
+		cohort.clear(); cohort.reserve(cohort_map.size());
+		for (auto& kv : cohort_map) cohort.push_back(kv.second);
+
+		// Inform cohort: START (multicast)
+		uint32_t ts = now_ms();
+		RmHeader start{}; fill_header(start, /*seq*/0, FLG_START, /*wnd*/1, ts, 0, /*retrans_id*/1);
+		std::vector<uint8_t> pkt(sizeof(RmHeader));
+		serialize_header(start, pkt.data());
+		if (!xmit(pkt)) {
+			auto us = elapsed_us();
+			double ms = us / 1000.0;
+			std::cerr << "Handshake failed while sending START after "
+					  << us << " us (" << ms << " ms), cohort size="
+					  << cohort.size() << "\n";
+			return false;
+		}
+
+		auto us = elapsed_us();
+		double ms = us / 1000.0;
+		std::cerr << "Handshake complete in " << us << " us ("
+				  << ms << " ms). Cohort size=" << cohort.size()
+				  << ". Sent START.\n";
+
+		return true;
+	}
+
 
 
 
@@ -315,63 +325,104 @@ private:
         return send_fin(seq++);
     }
 
-    bool send_data(uint32_t seq, const std::vector<uint8_t>& app) {
-        for (int attempt = 0; attempt <= A.retries; ++attempt) {
-            uint32_t ts = now_ms();
-            std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
-            RmHeader h{}; fill_header(h, seq, FLG_DATA, /*wnd*/1, ts, 0);
-            serialize_header(h, pkt.data());
-            if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
-            if (!xmit(pkt)) return false;
-            std::cerr << "DATA seq=" << seq << " len=" << app.size() << " (try " << (attempt+1) << ")\n";
-            if (wait_all_acks(seq, ts)) return true; // success
-            std::cerr << "  timeout waiting DATA ACKs -> retransmit\n";
-        }
-        std::cerr << "Failed to deliver DATA seq=" << seq << " after retries\n";
-        return false;
-    }
+	bool send_data(uint32_t seq, const std::vector<uint8_t>& app) {
+		constexpr uint8_t kMaxRetransId = 8;
 
-    bool send_fin(uint32_t seq) {
-        for (int attempt = 0; attempt <= A.retries; ++attempt) {
-            uint32_t ts = now_ms();
-            std::vector<uint8_t> pkt(sizeof(RmHeader));
-            RmHeader h{}; fill_header(h, seq, FLG_FIN, /*wnd*/0, ts, 0);
-            serialize_header(h, pkt.data());
-            if (!xmit(pkt)) return false;
-            std::cerr << "FIN seq=" << seq << " (try " << (attempt+1) << ")\n";
-            if (wait_all_acks(seq, ts)) {
-                std::cerr << "All receivers ACKed FIN. Done.\n";
-                return true;
-            }
-            std::cerr << "  timeout waiting FIN ACKs -> retransmit\n";
-        }
-        std::cerr << "Failed to deliver FIN after retries\n";
-        return false;
-    }
+		// attempt 0 => retrans_id 1, attempt 1 => retrans_id 2, ... up to 8
+		for (int attempt = 0, rid = 1;
+			 attempt <= A.retries && rid <= kMaxRetransId;
+			 ++attempt, ++rid) {
 
-    bool wait_all_acks(uint32_t seq, uint32_t ts_sent) {
-        std::unordered_set<uint64_t> got; got.reserve(cohort.size()*2);
-        auto pack_key = [](const sockaddr_in& a){ return (uint64_t)a.sin_addr.s_addr << 16 | ntohs(a.sin_port); };
-        auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
-        while (Clock::now() < deadline) {
-            sockaddr_in peer{}; RmHeader rh{};
-            if (!recv_header(peer, rh)) break; // timeout -> break to trigger retransmit by caller
-            if (!verify_header(rh)) continue;
-            if ((ntohs(rh.flags) & FLG_ACK) == 0) continue;
-            // We require ack.seq == our seq and rh.tsecr == ts_sent
-            if (ntohl(rh.seq) != seq) continue;
-            if (ntohl(rh.tsecr) != ts_sent) continue;
-            // Check that peer is part of cohort
-            bool member = false;
-            for (auto& c : cohort) {
-                if (c.sin_addr.s_addr == peer.sin_addr.s_addr && c.sin_port == peer.sin_port) { member = true; break; }
-            }
-            if (!member) continue; // ignore unknown
-            got.insert(pack_key(peer));
-            if (got.size() >= cohort.size()) return true;
-        }
-        return false;
-    }
+			uint8_t retrans_id = (uint8_t)rid;
+
+			uint32_t ts = now_ms();
+			std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+			RmHeader h{}; fill_header(h, seq, FLG_DATA, /*wnd*/1, ts, 0, retrans_id);
+			serialize_header(h, pkt.data());
+			if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+
+			if (!xmit(pkt)) return false;
+
+			std::cerr << "DATA seq=" << seq << " len=" << app.size()
+					  << " (try " << (attempt+1) << ", retrans_id=" << (int)retrans_id << ")\n";
+
+			// Only count ACKs that match this retrans_id epoch.
+			if (wait_all_acks(seq, ts, retrans_id)) return true;
+
+			std::cerr << "  timeout waiting DATA ACKs -> retransmit\n";
+		}
+
+		std::cerr << "Failed to deliver DATA seq=" << seq
+				  << " after retries/retrans_id limit\n";
+		return false;
+	}
+
+	bool send_fin(uint32_t seq) {
+		constexpr uint8_t kMaxRetransId = 8;
+
+		for (int attempt = 0, rid = 1;
+			 attempt <= A.retries && rid <= kMaxRetransId;
+			 ++attempt, ++rid) {
+
+			uint8_t retrans_id = (uint8_t)rid;
+
+			uint32_t ts = now_ms();
+			std::vector<uint8_t> pkt(sizeof(RmHeader));
+			RmHeader h{}; fill_header(h, seq, FLG_FIN, /*wnd*/0, ts, 0, retrans_id);
+			serialize_header(h, pkt.data());
+
+			if (!xmit(pkt)) return false;
+
+			std::cerr << "FIN seq=" << seq
+					  << " (try " << (attempt+1) << ", retrans_id=" << (int)retrans_id << ")\n";
+
+			if (wait_all_acks(seq, ts, retrans_id)) {
+				std::cerr << "All receivers ACKed FIN. Done.\n";
+				return true;
+			}
+
+			std::cerr << "  timeout waiting FIN ACKs -> retransmit\n";
+		}
+
+		std::cerr << "Failed to deliver FIN after retries/retrans_id limit\n";
+		return false;
+	}
+
+
+	bool wait_all_acks(uint32_t seq, uint32_t ts_sent, uint8_t retrans_id_expected) {
+		std::unordered_set<uint64_t> got; got.reserve(cohort.size() * 2);
+		auto pack_key = [](const sockaddr_in& a){
+			return (uint64_t)a.sin_addr.s_addr << 16 | ntohs(a.sin_port);
+		};
+
+		auto deadline = Clock::now() + std::chrono::milliseconds(A.rto_ms);
+		while (Clock::now() < deadline) {
+			sockaddr_in peer{}; RmHeader rh{};
+			if (!recv_header(peer, rh)) break; // timeout -> break to trigger retransmit by caller
+			if (!verify_header(rh)) continue;
+			if ((ntohs(rh.flags) & FLG_ACK) == 0) continue;
+
+			// Require ack.seq == our seq and rh.tsecr == ts_sent
+			if (ntohl(rh.seq) != seq) continue;
+			if (ntohl(rh.tsecr) != ts_sent) continue;
+
+			// NEW: Only accept ACKs for the current retransmission epoch.
+			if (rh.retrans_id != retrans_id_expected) continue;
+
+			// Check that peer is part of cohort
+			bool member = false;
+			for (auto& c : cohort) {
+				if (c.sin_addr.s_addr == peer.sin_addr.s_addr && c.sin_port == peer.sin_port) {
+					member = true; break;
+				}
+			}
+			if (!member) continue; // ignore unknown
+
+			got.insert(pack_key(peer));
+			if (got.size() >= cohort.size()) return true;
+		}
+		return false;
+	}
 
     bool xmit(const std::vector<uint8_t>& bytes) {
         ssize_t n = sendto(fd, bytes.data(), bytes.size(), 0, (sockaddr*)&mcast, sizeof(mcast));
@@ -395,15 +446,19 @@ private:
         return true;
     }
 
-    void fill_header(RmHeader& h, uint32_t seq, uint16_t flags, uint16_t wnd, uint32_t ts, uint32_t tsecr) {
-        h.seq = htonl(seq);
-        h.src_port = htons(A.sender_port);
-        h.flags = htons(flags);
-        h.window = htons(wnd);
-        h.checksum = 0;
-        h.tsval = htonl(ts);
-        h.tsecr = htonl(tsecr);
-    }
+	void fill_header(RmHeader& h, uint32_t seq, uint16_t flags, uint16_t wnd, uint32_t ts, uint32_t tsecr,
+					 uint8_t retrans_id = 1) {
+		h.seq = htonl(seq);
+		h.src_port = htons(A.sender_port);
+		h.flags = htons(flags);
+		h.retrans_id = retrans_id;
+		h.reserved = 0;
+		h.window = htons(wnd);
+		h.checksum = 0;
+		h.tsval = htonl(ts);
+		h.tsecr = htonl(tsecr);
+	}
+
 
     void serialize_header(RmHeader& h, uint8_t* out) {
         // compute checksum over header with checksum=0

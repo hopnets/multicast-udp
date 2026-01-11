@@ -43,13 +43,15 @@ struct RmHeader {
     uint32_t seq;        // Sequence Number (network order on wire)
     uint16_t src_port;   // Sender's UDP port (network order)
     uint16_t flags;      // Flags (network order)
+    uint8_t  retrans_id; // Retransmission attempt id (1..8)
+    uint8_t  reserved;   // Must be zero
     uint16_t window;     // Window (network order)
     uint16_t checksum;   // Internet checksum over header only (network order)
     uint32_t tsval;      // Sender timestamp (network order)
     uint32_t tsecr;      // Echo timestamp (network order)
 };
 #pragma pack(pop)
-static_assert(sizeof(RmHeader) == 20, "RmHeader must be 20 bytes");
+static_assert(sizeof(RmHeader) == 22, "RmHeader must be 22 bytes");
 
 enum : uint16_t {
     FLG_SYN   = 0x0001,
@@ -183,15 +185,18 @@ public:
 
             uint16_t flags = ntohs(h.flags);
             uint32_t seq = ntohl(h.seq);
-            uint32_t tsval = ntohl(h.tsval);
-            uint16_t sender_port_hdr = ntohs(h.src_port);
+			uint32_t tsval = ntohl(h.tsval);
+			uint16_t sender_port_hdr = ntohs(h.src_port);
+			uint8_t retrans_id = h.retrans_id; // NEW: echo this in ACKs
+
 
             // Destination for ACKs: sender IP from packet, port from header's src_port
             sockaddr_in ack_to{}; ack_to.sin_family = AF_INET; ack_to.sin_addr = peer.sin_addr; ack_to.sin_port = htons(sender_port_hdr);
 
             if (flags & FLG_SYN) {
                 //std::cerr << "SYN from " << addr_to_string(peer) << " -> replying SYN|ACK to :" << sender_port_hdr << "\n";
-                send_ack(ack_to, /*seq*/0, /*flags*/FLG_SYN | FLG_ACK, /*tsecr*/tsval);
+                send_ack(ack_to, /*seq*/0, /*flags*/FLG_SYN | FLG_ACK, /*tsecr*/tsval, /*retrans_id*/retrans_id);
+
                 // Do not switch to started yet; wait for START
                 continue;
             }
@@ -205,7 +210,8 @@ public:
 
             if (!started && (flags & (FLG_DATA | FLG_FIN))) {
                 // Be robust: still ACK, but do not deliver payload if not started
-                send_ack(ack_to, seq, FLG_ACK, tsval);
+                send_ack(ack_to, seq, FLG_ACK, tsval, retrans_id);
+
                 std::cerr << "DATA/FIN before START; ACKed but ignored for delivery.\n";
                 if (flags & FLG_FIN) {
                     std::cerr << "FIN observed before START; exiting anyway.\n";
@@ -223,11 +229,13 @@ public:
                         total_bytes += app_len;
                     }
                     delivered = seq;
-                    send_ack(ack_to, seq, FLG_ACK, tsval);
+                    send_ack(ack_to, seq, FLG_ACK, tsval, retrans_id);
+
                     std::cerr << "DATA seq=" << seq << " len=" << (n - (ssize_t)sizeof(RmHeader)) << " -> delivered, total=" << total_bytes << " bytes\n";
                 } else if (seq == delivered) {
                     // Duplicate; re-ACK
-                    send_ack(ack_to, seq, FLG_ACK, tsval);
+                    send_ack(ack_to, seq, FLG_ACK, tsval, retrans_id);
+
                     std::cerr << "Duplicate DATA seq=" << seq << " -> re-ACK\n";
                 } else {
                     // Out-of-order (> delivered+1) should not happen in stop-and-wait; ignore to trigger retransmit
@@ -238,7 +246,8 @@ public:
 
             if (flags & FLG_FIN) {
                 // ACK and exit
-                send_ack(ack_to, seq, FLG_ACK, tsval);
+                send_ack(ack_to, seq, FLG_ACK, tsval, retrans_id);
+
                 std::cerr << "FIN seq=" << seq << " -> ACKed. Total received=" << total_bytes << " bytes\n";
                 return true;
             }
@@ -252,20 +261,26 @@ private:
         return r == calc;
     }
 
-    void send_ack(const sockaddr_in& to, uint32_t seq, uint16_t flags, uint32_t tsecr_in) {
-        RmHeader a{};
-        a.seq = htonl(seq);
-        a.src_port = htons(local_port()); // informative only
-        a.flags = htons(flags);
-        a.window = htons(1);
-        a.checksum = 0;
-        a.tsval = htonl(now_ms());
-        a.tsecr = htonl(tsecr_in);
-        // checksum
-        RmHeader tmp = a; tmp.checksum = 0; a.checksum = checksum16(&tmp, sizeof(tmp));
-        ssize_t n = sendto(fd, &a, sizeof(a), 0, (const sockaddr*)&to, sizeof(to));
-        if (n < 0) perror("sendto ACK");
-    }
+	void send_ack(const sockaddr_in& to, uint32_t seq, uint16_t flags, uint32_t tsecr_in, uint8_t retrans_id_in) {
+		RmHeader a{};
+		a.seq = htonl(seq);
+		a.src_port = htons(local_port()); // informative only
+		a.flags = htons(flags);
+		a.retrans_id = retrans_id_in;
+		a.reserved = 0;
+		a.window = htons(1);
+		a.checksum = 0;
+		a.tsval = htonl(now_ms());
+		a.tsecr = htonl(tsecr_in);
+
+		// checksum (header only)
+		RmHeader tmp = a; tmp.checksum = 0;
+		a.checksum = checksum16(&tmp, sizeof(tmp));
+
+		ssize_t n = sendto(fd, &a, sizeof(a), 0, (const sockaddr*)&to, sizeof(to));
+		if (n < 0) perror("sendto ACK");
+	}
+
 
     uint16_t local_port() const {
         sockaddr_in sa{}; socklen_t sl = sizeof(sa);
