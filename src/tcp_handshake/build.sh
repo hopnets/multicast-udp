@@ -1,0 +1,1 @@
+g++ -O2 -std=c++17 -pthread tcp_client_multi.cpp -o tcp_client_multi

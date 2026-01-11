@@ -190,18 +190,18 @@ public:
             sockaddr_in ack_to{}; ack_to.sin_family = AF_INET; ack_to.sin_addr = peer.sin_addr; ack_to.sin_port = htons(sender_port_hdr);
 
             if (flags & FLG_SYN) {
-                std::cerr << "SYN from " << addr_to_string(peer) << " -> replying SYN|ACK to :" << sender_port_hdr << "\n";
+                //std::cerr << "SYN from " << addr_to_string(peer) << " -> replying SYN|ACK to :" << sender_port_hdr << "\n";
                 send_ack(ack_to, /*seq*/0, /*flags*/FLG_SYN | FLG_ACK, /*tsecr*/tsval);
                 // Do not switch to started yet; wait for START
                 continue;
             }
 
-            if (flags & FLG_START) {
-                started = true;
-                std::cerr << "START received. Entering data phase.\n";
+            //if (flags & FLG_START) {
+            //    started = true;
+            //    std::cerr << "START received. Entering data phase.\n";
                 // No ACK required for START in this protocol
-                continue;
-            }
+            //    continue;
+            //}
 
             if (!started && (flags & (FLG_DATA | FLG_FIN))) {
                 // Be robust: still ACK, but do not deliver payload if not started
