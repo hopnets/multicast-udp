@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <random>
 
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
@@ -118,6 +119,8 @@ public:
     explicit PeelReceiver(const Args& args) : A(args) {}
     ~PeelReceiver() { if (fd >= 0) close(fd); if (ofs.is_open()) ofs.close(); }
 
+    const bool unreliable_mode_for_sender_testing = true;
+
     bool init() {
         fd = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) { perror("socket"); return false; }
@@ -191,6 +194,10 @@ public:
 
             if (flags & FLG_SYN) {
                 std::cerr << "SYN from " << addr_to_string(peer) << " -> replying SYN|ACK to :" << sender_port_hdr << "\n";
+                if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
+                    std::cerr << "not sending syn/ack because of deliberately introduced unreliability (testing the sender)" << std::endl;
+                    continue;
+                }
                 send_ack(ack_to, /*seq*/0, /*flags*/FLG_SYN | FLG_ACK, /*tsecr*/tsval);
                 // Do not switch to started yet; wait for START
                 continue;
@@ -217,6 +224,10 @@ public:
             if (flags & FLG_DATA) {
                 // Stop-and-wait expectation: next seq should be delivered+1
                 if (seq == delivered + 1) {
+                    if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
+                        std::cerr << "not sending syn/ack because of deliberately introduced unreliability (testing the sender)" << std::endl;
+                        continue;
+                    }
                     size_t app_len = (size_t)n - sizeof(RmHeader);
                     if (app_len > 0) {
                         if (ofs.is_open()) ofs.write(reinterpret_cast<const char*>(buf.data() + sizeof(RmHeader)), (std::streamsize)app_len);
@@ -227,6 +238,10 @@ public:
                     std::cerr << "DATA seq=" << seq << " len=" << (n - (ssize_t)sizeof(RmHeader)) << " -> delivered, total=" << total_bytes << " bytes\n";
                 } else if (seq == delivered) {
                     // Duplicate; re-ACK
+                    if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
+                        std::cerr << "not sending ack because of deliberately introduced unreliability (testing the sender)" << std::endl;
+                        continue;
+                    }
                     send_ack(ack_to, seq, FLG_ACK, tsval);
                     std::cerr << "Duplicate DATA seq=" << seq << " -> re-ACK\n";
                 } else {
