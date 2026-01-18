@@ -233,6 +233,111 @@ public:
         return false;
     }
 
+
+    static void add_dummy_elem_to_window(std::list<WindowEntry> *window, uint32_t *seq) {
+        auto contents = std::vector<uint8_t>();
+        contents.push_back('t');
+        contents.push_back('e');
+        contents.push_back('s');
+        contents.push_back('t');
+        window->push_back(WindowEntry{contents, false, (*seq)++,0,0});
+    }
+
+    static int get_num_additional_packets_sendable(std::list<WindowEntry> *window, int cwnd) {
+        int len = window->size();
+        return cwnd - len;
+    }
+
+    bool run_windowed_sliding() {
+        auto cwnd = 10;
+        if (!handshake()) return false;
+        if (!A.file.empty()) return send_file_windowed_twothreaded(A.file);
+        uint32_t seq = 1;
+
+        std::cerr << "handshake successful, entering data transmission" << std::endl;
+
+        // init the window with the data
+        std::list window = std::list<WindowEntry>();
+
+        for (int i = 0; i < cwnd; i++) {
+            add_dummy_elem_to_window(&window, &seq);
+        }
+
+        // storing retries for all packets
+        auto attempts = 0;
+        std::atomic<bool> halt{false};
+        std::mutex mutex;
+        // while the window is not empty:
+        std::thread ackthread(run_windowed_sliding_ackthread, this, &window, &mutex, &halt, cwnd, &seq);
+
+        while (attempts < A.retries) {
+            // attempt to send each packet in the window if it isn't flagged as sent
+            mutex.lock();
+            auto empty = window.empty();
+            if (empty) {
+                mutex.unlock();
+                break;
+            }
+
+            for (auto it = window.begin(); it != window.end(); it++) {
+                auto app =  (*it).contents;
+                uint32_t ts = now_ms();
+                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+                RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
+                serialize_header(h, pkt.data());
+                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+                if (!xmit(pkt)) {
+                    halt = true;
+                    ackthread.join();
+                    return false; // failed to transmit window
+                }
+                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
+            }
+            mutex.unlock();
+            // wait the retry duration
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
+            attempts++;
+        }
+        halt = true;
+        ackthread.join();
+    }
+
+    static void run_windowed_sliding_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {
+        while (true) {
+            // loop condition
+            const bool halting = *halt;
+            if (halting) {
+                break;
+            }
+            // listen for acks and flag as acked
+            auto [res, seq] = p->wait_for_ack();
+            if (res) {
+                mutex->lock();
+                for (auto it = window->begin(); it != window->end(); it++) {
+                    if ((*it).sequence_number == seq) {
+                        std::cerr << "listen: received ack for seq number " << seq << std::endl;
+                        (*it).ack_status = true;
+                    }
+                }
+                // clean up the window, if empty, break
+                while (!window->empty()) {
+                    auto front = window->front();
+                    if (front.ack_status != true) {
+                        break;
+                    }
+                    window->pop_front();
+                    std::cerr << "remove: popping back because of ack status true" << std::endl;
+                    auto amt = get_num_additional_packets_sendable(window, cwnd);
+                    for (int i = 0; i < amt; i++) {
+                        add_dummy_elem_to_window(window, lastseq);
+                    }
+                }
+                mutex->unlock();
+            }
+        }
+    }
+
     bool run_windowed_twothreaded() {
         // separate thread for receiving acks
         auto cwnd = 10;
@@ -720,6 +825,6 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 1;
     PeelSender s(args);
     if (!s.init()) return 2;
-    if (!s.run_windowed_twothreaded()) return 3;
+    if (!s.run_windowed_sliding()) return 3;
     return 0;
 }
