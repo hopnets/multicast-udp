@@ -35,6 +35,7 @@
 #include <atomic>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -134,8 +135,10 @@ struct Args {
     size_t max_app_payload = 1452;      // default for Ethernet MTU (1472 total - 20 header)
 };
 
+const auto sleep_time_after_hit_max_retries_ms = 5000;
+
 struct WindowEntry {
-	std::vector<uint8_t> contents;
+	int len;
 	bool ack_status = false;
     uint32_t sequence_number;
     uint64_t last_retry;
@@ -234,13 +237,8 @@ public:
     }
 
 
-    static void add_dummy_elem_to_window(std::list<WindowEntry> *window, uint32_t *seq) {
-        auto contents = std::vector<uint8_t>();
-        contents.push_back('t');
-        contents.push_back('e');
-        contents.push_back('s');
-        contents.push_back('t');
-        window->push_back(WindowEntry{contents, false, (*seq)++,0,0});
+    static void add_dummy_elem_to_window(std::list<WindowEntry> *window, uint32_t *seq, int got) {
+        window->push_back(WindowEntry{got, false, (*seq)++,0,0});
     }
 
     static int get_num_additional_packets_sendable(std::list<WindowEntry> *window, int cwnd) {
@@ -248,62 +246,104 @@ public:
         return cwnd - len;
     }
 
+    void init_window(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istringstream *s) {
+        std::cerr << "initializing the window" << std::endl;
+        for (int i = 0; i < cwnd && i < std::ceil(stream_size/A.max_app_payload); i++) {
+            s->read(reinterpret_cast<char*>(buf->data()), (std::streamsize)buf->size());
+            std::streamsize got = s->gcount();
+            std::cerr << "read" << std::to_string(got) << "characters" << std::endl;
+            if (got <= 0) break; // redundant?
+            add_dummy_elem_to_window(window, seq, static_cast<int>(got));
+            // sequence number corresponds directly with index of contents in stream
+        }
+    }
+
+    void flush_window_and_wait_then_retry(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istringstream *s) {
+        init_window(window, cwnd, stream_size, buf, seq, s);
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_after_hit_max_retries_ms));
+    }
+
     bool run_windowed_sliding() {
-        auto cwnd = 10;
+        const auto cwnd = 10;
         if (!handshake()) return false;
-        if (!A.file.empty()) return send_file_windowed_twothreaded(A.file);
+        // if (!A.file.empty()) return send_file_windowed_sliding(A.file);
+
+        std::string dummy_file = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.";
+
         uint32_t seq = 1;
+        std::istringstream s(dummy_file, std::ios::binary);
+        std::vector<uint8_t> buf(A.max_app_payload);
 
         std::cerr << "handshake successful, entering data transmission" << std::endl;
 
         // init the window with the data
         std::list window = std::list<WindowEntry>();
-
-        for (int i = 0; i < cwnd; i++) {
-            add_dummy_elem_to_window(&window, &seq);
-        }
+        // get size
+        s.seekg(0, std::ios::end);
+        std::streampos stream_size = s.tellg();
+        s.seekg(0, std::ios::beg);
+        init_window(&window, cwnd, stream_size, &buf, &seq, &s);
+        std::cerr << "initializing window with dummy data" << std::endl;
 
         // storing retries for all packets
-        auto attempts = 0;
         std::atomic<bool> halt{false};
         std::mutex mutex;
         // while the window is not empty:
-        std::thread ackthread(run_windowed_sliding_ackthread, this, &window, &mutex, &halt, cwnd, &seq);
+        std::cerr << "before initializing the ack collector thread" << std::endl;
+        std::thread ackthread(run_windowed_sliding_ackthread, this, &s, &window, &mutex, &halt, cwnd, &seq);
+        std::cerr << "initialized the ack collector thread" << std::endl;
 
-        while (attempts < A.retries) {
+        while (true) {
             // attempt to send each packet in the window if it isn't flagged as sent
             mutex.lock();
             auto empty = window.empty();
             if (empty) {
+                std::cerr << "window is empty - exiting the sender program" << std::endl;
                 mutex.unlock();
                 break;
             }
+            auto win_back_exceeds_max_retries = window.back().num_tries >= A.retries;
+            if (win_back_exceeds_max_retries) {
+                std::cerr << "a packet exceeded max retries - flushing and retrying" << std::endl;
+                flush_window_and_wait_then_retry(&window, cwnd, stream_size, &buf, &seq, &s);
+                mutex.unlock();
+                continue;
+            }
 
             for (auto it = window.begin(); it != window.end(); it++) {
-                auto app =  (*it).contents;
+                auto start = (*it).sequence_number * A.max_app_payload;
+                auto end = start + (*it).len;
+
+                s.seekg(start);
+                std::vector<char> app(A.max_app_payload);
+                assert((*it).len <= app.size());
+                s.read(app.data(), (*it).len);
+                auto got = s.gcount();
+
                 uint32_t ts = now_ms();
                 std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
                 RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
                 serialize_header(h, pkt.data());
-                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
+                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), got);
                 if (!xmit(pkt)) {
                     halt = true;
                     ackthread.join();
                     return false; // failed to transmit window
                 }
-                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
+                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << ((*it).num_tries+1) << ")\n";
+                (*it).num_tries++;
             }
             mutex.unlock();
             // wait the retry duration
 
             std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
-            attempts++;
         }
         halt = true;
         ackthread.join();
+        return true;
     }
 
-    static void run_windowed_sliding_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {
+    static void run_windowed_sliding_ackthread(PeelSender *p, std::istringstream *dummy_data, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {
         while (true) {
             // loop condition
             const bool halting = *halt;
@@ -330,284 +370,18 @@ public:
                     std::cerr << "remove: popping back because of ack status true" << std::endl;
                     auto amt = get_num_additional_packets_sendable(window, cwnd);
                     for (int i = 0; i < amt; i++) {
-                        add_dummy_elem_to_window(window, lastseq);
-                    }
-                }
-                mutex->unlock();
-            }
-        }
-    }
-
-    bool run_windowed_twothreaded() {
-        // separate thread for receiving acks
-        auto cwnd = 10;
-        if (!handshake()) return false;
-        if (!A.file.empty()) return send_file_windowed_twothreaded(A.file);
-        uint32_t seq = 1;
-
-        std::cerr << "handshake successful, entering data transmission" << std::endl;
-
-        // init the window with the data
-        std::list window = std::list<WindowEntry>();
-
-        for (int i = 0; i < cwnd; i++) {
-            auto contents = std::vector<uint8_t>();
-            contents.push_back('t');
-            contents.push_back('e');
-            contents.push_back('s');
-            contents.push_back('t');
-            window.push_back(WindowEntry{contents, false, seq++,0,0});
-        }
-
-        // storing retries for all packets
-        auto attempts = 0;
-        std::atomic<bool> halt{false};
-        std::mutex mutex;
-        // while the window is not empty:
-        std::thread ackthread(run_windowed_twothreaded_ackthread, this, &window, &mutex, &halt);
-
-        while (attempts < A.retries) {
-            // attempt to send each packet in the window if it isn't flagged as sent
-            mutex.lock();
-            auto empty = window.empty();
-            if (empty) {
-                mutex.unlock();
-                break;
-            }
-
-            for (auto it = window.begin(); it != window.end(); it++) {
-                auto app =  (*it).contents;
-                uint32_t ts = now_ms();
-                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
-                RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
-                serialize_header(h, pkt.data());
-                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
-                if (!xmit(pkt)) {
-                    halt = true;
-                    ackthread.join();
-                    return false; // failed to transmit window
-                }
-                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
-            }
-            mutex.unlock();
-            // wait the retry duration
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
-            attempts++;
-        }
-        halt = true;
-        ackthread.join();
-    }
-
-    static void run_windowed_twothreaded_ackthread(PeelSender *p, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt) {
-        while (true) {
-            // loop condition
-            const bool halting = *halt;
-            if (halting) {
-                break;
-            }
-            // listen for acks and flag as acked
-            auto [res, seq] = p->wait_for_ack();
-            if (res) {
-                mutex->lock();
-                for (auto it = window->begin(); it != window->end(); it++) {
-                    if ((*it).sequence_number == seq) {
-                        std::cerr << "listen: received ack for seq number " << seq << std::endl;
-                        (*it).ack_status = true;
-                    }
-                }
-                // clean up the window, if empty, break
-                while (!window->empty()) {
-                    auto front = window->front();
-                    if (front.ack_status != true) {
-                        break;
-                    }
-                    window->pop_front();
-                    std::cerr << "remove: popping back because of ack status true" << std::endl;
-                }
-                mutex->unlock();
-            }
-        }
-    }
-
-
-    bool run_windowed_singlethreaded() {
-        auto cwnd = 10;
-        if (!handshake()) return false;
-        if (!A.file.empty()) return send_file_windowed_singlethreaded(A.file);
-        uint32_t seq = 1;
-
-        std::cerr << "handshake successful, entering data transmission" << std::endl;
-
-        // init the window with the data
-        std::list window = std::list<WindowEntry>();
-
-        for (int i = 0; i < cwnd; i++) {
-            auto contents = std::vector<uint8_t>();
-            contents.push_back('t');
-            contents.push_back('e');
-            contents.push_back('s');
-            contents.push_back('t');
-            window.push_back(WindowEntry{contents, false, seq++,0,0});
-        }
-
-        // storing retries for all packets
-        auto attempts = 0;
-        // while the window is not empty:
-
-        while (!window.empty() and attempts < A.retries) {
-            // attempt to send each packet in the window if it isn't flagged as sent
-            for (auto it = window.begin(); it != window.end(); it++) {
-                auto app =  (*it).contents;
-                uint32_t ts = now_ms();
-                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
-                RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
-                serialize_header(h, pkt.data());
-                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
-                if (!xmit(pkt)) return false; // failed to transmit window
-
-                std::cerr << "DATA seq=" << (*it).sequence_number << " len=" << app.size() << " (try " << (attempts+1) << ")\n";
-            }
-            attempts++;
-
-            // for the retry duration:
-
-            auto listen_start_time = now_ms();
-            while (now_ms() - listen_start_time < A.rto_ms) {
-                // listen for acks and flag as acked
-                auto [res, seq] = wait_for_ack();
-                if (res) {
-                    for (auto it = window.begin(); it != window.end(); it++) {
-                        if ((*it).sequence_number == seq) {
-                            std::cerr << "listen: received ack for seq number" << seq << std::endl;
-                            (*it).ack_status = true;
+                        dummy_data->seekg((*lastseq+i)*p->A.max_app_payload);
+                        std::vector<char> buf(p->A.max_app_payload);
+                        dummy_data->read(buf.data(), p->A.max_app_payload);
+                        std::streamsize got = dummy_data->gcount();
+                        if (got <= 0) {
+                            mutex->unlock();
+                            return; // is this right?
                         }
-                    }
-                    // clean up the window, if empty, break
-                    const auto& first = window.front();
-                    if (first.ack_status == true) {
-                        window.pop_front();
-                        std::cerr << "remove: popping back because of ack status true" << std::endl;
+                        add_dummy_elem_to_window(window, lastseq, got);
                     }
                 }
-            }
-        }
-    }
-
-    bool send_file_windowed_singlethreaded(std::string file) {
-
-    }
-
-    // consider renaming
-    bool run_windowed() {
-        // this implementation will use a std::vector for now
-        // it can later use a Dmitry Vyukov queue
-        auto cwnd = 10;
-        if (!handshake()) return false;
-        if (!A.file.empty()) return send_file_windowed(A.file);
-        uint32_t seq = 1;
-
-        std::cerr << "handshake successful, entering data transmission" << std::endl;
-        // auto window = new mpsc_bounded_queue<WindowEntry>(cwnd);
-
-        // creating a window of packets
-        std::mutex mutex;
-        auto window = new std::vector<WindowEntry>();
-        for (int i = 0; i < cwnd; i++) {
-            auto contents = std::vector<uint8_t>();
-            contents.push_back('t');
-            contents.push_back('e');
-            contents.push_back('s');
-            contents.push_back('t');
-            window->push_back(WindowEntry{contents, false, seq++,0,0});
-        }
-        std::cerr << "created dummy data" << std::endl;
-        bool halt = false;
-        auto seqs_to_timestamps_sent = std::map<uint32_t, uint64_t>();
-
-        // sending packets all at once and waiting for ACKs
-        // thread 1 (listenthread): listen for ACKs and mutate the ack statuses
-        std::thread listener(&PeelSender::listenthread, this, window, &seqs_to_timestamps_sent, &halt, &mutex);
-        // thread 2 (sendthread) (in this function): send all the packets, then exit
-        // thread 3: (remthread) removing the first entry if its ack status is true
-        std::thread remover(remthread, window, &mutex);
-
-        std::cerr << "created listener and remover threads" << std::endl;
-
-        // sending packets: all at once with retries for each
-        uint64_t retry_delay = 10;
-        while (!halt) {
-            std::cerr << "trying from the top of the while loop in run_windowed" << std::endl;
-            auto num_not_retrying = 0;
-            auto acked = 0;
-            mutex.lock();
-            for (int window_index = 0; window_index < window->size(); ++window_index) {
-                if (static_cast<uint64_t>(now_ms()) - (*window)[window_index].last_retry < retry_delay) {
-                    mutex.unlock();
-                    continue;
-                }
-                if ((*window)[window_index].ack_status == true) {
-                    mutex.unlock();
-                    acked++;
-                    continue;
-                }
-                if ((*window)[window_index].num_tries > A.retries) {
-                    num_not_retrying++;
-                    mutex.unlock();
-                    continue;
-                }
-                auto app = (*window)[window_index].contents;
-                 // is this a good idea, the double lock/unlock?
-                uint32_t ts = now_ms();
-                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
-                RmHeader h{}; fill_header(h, (*window)[window_index].sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
-                serialize_header(h, pkt.data());
-                if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), app.size());
-                if (!xmit(pkt)) return false; // failed to transmit window
-
-                std::cerr << "DATA seq=" << (*window)[window_index].sequence_number << " len=" << app.size() << " (try " << ((*window)[window_index].num_tries+1) << ")\n";
-                (*window)[window_index].num_tries++;
-            }
-            mutex.unlock();
-            if (num_not_retrying == window->size()) {
-                std::cerr << "Failed to deliver DATA seq=" << seq << " after retries\n";
-                return false;
-            }
-            if (window->empty()) { // because of acks being sent
-                return true;
-            }
-        }
-
-        // cleanup
-        delete window;
-        return true;
-    }
-    static void remthread(std::vector<WindowEntry> *v, std::mutex *m) {
-        std::cerr << "entering remthread" << std::endl;
-        while (v->empty() != true) {
-            const auto& first = v->front();
-            if (first.ack_status == true) {
-                m->lock();
-                v->pop_back();
-                m->unlock();
-                std::cerr << "remthread: popping back because of ack status true" << std::endl;
-            }
-        }
-    }
-    void listenthread(std::vector<WindowEntry> *l, std::map<uint32_t, uint64_t> *seqs_to_timestamps_sent, bool *halt, std::mutex *m) {
-        // listens for ACKs for all sequence numbers provided
-        std::cerr << "entering listenthread" << std::endl;
-        while (!*halt) {
-            auto [res, seq] = wait_for_ack();
-            if (res) {
-                for (long unsigned int i = 0; i < l->size(); i++) {
-                    if ((*l)[i].sequence_number == seq) {
-                        std::cerr << "listenthread: received ack for seq number" << seq << std::endl;
-                        m->lock();
-                        (*l)[i].ack_status = true;
-                        m->unlock();
-                    }
-                }
+                mutex->unlock();
             }
         }
     }
