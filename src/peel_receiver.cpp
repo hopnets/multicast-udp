@@ -52,6 +52,11 @@ struct RmHeader {
 #pragma pack(pop)1
 static_assert(sizeof(RmHeader) == 20, "RmHeader must be 20 bytes");
 
+struct RecvrWindowEntry {
+    uint32_t seq;
+    bool acked;
+};
+
 enum : uint16_t {
     FLG_SYN   = 0x0001,
     FLG_ACK   = 0x0002,
@@ -60,6 +65,8 @@ enum : uint16_t {
     FLG_FIN   = 0x0010,
     FLG_RST   = 0x0020,
 };
+
+auto NUM_PACKETS_CAPACITY = 512;
 
 static uint32_t now_ms() {
     auto now = Clock::now().time_since_epoch();
@@ -171,6 +178,7 @@ public:
         uint64_t total_bytes = 0;
 
         std::vector<uint8_t> buf(65536);
+        RecvrWindowEntry recv[] = {}; 
         while (true) {
             sockaddr_in peer{}; socklen_t alen = sizeof(peer);
             ssize_t n = recvfrom(fd, buf.data(), buf.size(), 0, (sockaddr*)&peer, &alen);
@@ -246,7 +254,8 @@ public:
                     std::cerr << "Duplicate DATA seq=" << seq << " -> re-ACK\n";
                 } else {
                     // Out-of-order (> delivered+1) should not happen in stop-and-wait; ignore to trigger retransmit
-                    std::cerr << "Out-of-order DATA seq=" << seq << " (expected " << (delivered+1) << ") -> ignoring (no ACK)\n";
+                    // send_ack(ack_to, seq, FLG_ACK, tsval);
+                    std::cerr << "Out-of-order DATA seq=" << seq << " (expected " << (delivered+1) << ") -> sending ACK (accepting out-of-order packets) \n";
                 }
                 continue;
             }

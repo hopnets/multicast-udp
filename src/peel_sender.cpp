@@ -238,7 +238,7 @@ public:
 
 
     static void add_dummy_elem_to_window(std::list<WindowEntry> *window, uint32_t *seq, int got) {
-        window->push_back(WindowEntry{got, false, (*seq)++,0,0});
+        window->push_back(WindowEntry{got, false, *seq,0,0});
     }
 
     static int get_num_additional_packets_sendable(std::list<WindowEntry> *window, int cwnd) {
@@ -246,32 +246,46 @@ public:
         return cwnd - len;
     }
 
-    void init_window(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istringstream *s) {
+    void init_window(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istream *s) {
         std::cerr << "initializing the window" << std::endl;
-        for (int i = 0; i < cwnd && i < std::ceil(stream_size/A.max_app_payload); i++) {
+        std::cerr << "cwnd: " << std::to_string(cwnd) << std::endl;
+        std::cerr << std::to_string(stream_size) << std::endl;
+        std::cerr << std::to_string(A.max_app_payload) << std::endl;
+        for (int i = 0; i < cwnd && i < std::ceil(stream_size/A.max_app_payload)+1; i++) {
             s->read(reinterpret_cast<char*>(buf->data()), (std::streamsize)buf->size());
             std::streamsize got = s->gcount();
-            std::cerr << "read" << std::to_string(got) << "characters" << std::endl;
-            if (got <= 0) break; // redundant?
+            std::cerr << "read " << std::to_string(got) << " characters" << std::endl;
+            if (got <= 0) {
+                std::cerr << "got is zero in init_window" << std::endl;
+                break; // redundant?
+            }
+            std::cerr << "got is not zero in init_window" << std::endl;
             add_dummy_elem_to_window(window, seq, static_cast<int>(got));
+            (*seq)++;
             // sequence number corresponds directly with index of contents in stream
         }
     }
 
-    void flush_window_and_wait_then_retry(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istringstream *s) {
+    void flush_window_and_wait_then_retry(std::list<WindowEntry> *window, int cwnd, std::streamsize stream_size, std::vector<uint8_t> *buf, uint32_t *seq, std::istream *s) {
         init_window(window, cwnd, stream_size, buf, seq, s);
+        s->clear();
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time_after_hit_max_retries_ms));
     }
 
     bool run_windowed_sliding() {
         const auto cwnd = 10;
         if (!handshake()) return false;
-        // if (!A.file.empty()) return send_file_windowed_sliding(A.file);
-
-        std::string dummy_file = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.";
-
+        std::istream *s;
+        if (!A.file.empty()) {
+            s = new std::ifstream(A.file);
+            if (s->fail()) { // we should check at every step of reading data that the file is still readable
+                return false;
+            }
+        } else {
+            std::string dummy_file = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.";
+            s = new std::istringstream(dummy_file, std::ios::binary);
+        }
         uint32_t seq = 1;
-        std::istringstream s(dummy_file, std::ios::binary);
         std::vector<uint8_t> buf(A.max_app_payload);
 
         std::cerr << "handshake successful, entering data transmission" << std::endl;
@@ -279,10 +293,10 @@ public:
         // init the window with the data
         std::list window = std::list<WindowEntry>();
         // get size
-        s.seekg(0, std::ios::end);
-        std::streampos stream_size = s.tellg();
-        s.seekg(0, std::ios::beg);
-        init_window(&window, cwnd, stream_size, &buf, &seq, &s);
+        s->seekg(0, std::ios::end);
+        std::streampos stream_size = s->tellg();
+        s->seekg(0, std::ios::beg);
+        init_window(&window, cwnd, stream_size, &buf, &seq, s);
         std::cerr << "initializing window with dummy data" << std::endl;
 
         // storing retries for all packets
@@ -290,10 +304,10 @@ public:
         std::mutex mutex;
         // while the window is not empty:
         std::cerr << "before initializing the ack collector thread" << std::endl;
-        std::thread ackthread(run_windowed_sliding_ackthread, this, &s, &window, &mutex, &halt, cwnd, &seq);
+        std::thread ackthread(run_windowed_sliding_ackthread, this, s, &window, &mutex, &halt, cwnd, &seq);
         std::cerr << "initialized the ack collector thread" << std::endl;
 
-        while (true) {
+        while (!halt) {
             // attempt to send each packet in the window if it isn't flagged as sent
             mutex.lock();
             auto empty = window.empty();
@@ -305,23 +319,28 @@ public:
             auto win_back_exceeds_max_retries = window.back().num_tries >= A.retries;
             if (win_back_exceeds_max_retries) {
                 std::cerr << "a packet exceeded max retries - flushing and retrying" << std::endl;
-                flush_window_and_wait_then_retry(&window, cwnd, stream_size, &buf, &seq, &s);
+                flush_window_and_wait_then_retry(&window, cwnd, stream_size, &buf, &seq, s);
                 mutex.unlock();
                 continue;
             }
 
             for (auto it = window.begin(); it != window.end(); it++) {
-                auto start = (*it).sequence_number * A.max_app_payload;
+                long start = ((*it).sequence_number-1)* A.max_app_payload;
                 auto end = start + (*it).len;
-
-                s.seekg(start);
+                std::cerr << "start in run_windowed_sliding: " << std::to_string(start) << std::endl;
+                s->clear();
+                s->seekg(start, std::ios::beg);
                 std::vector<char> app(A.max_app_payload);
                 assert((*it).len <= app.size());
-                s.read(app.data(), (*it).len);
-                auto got = s.gcount();
+                std::cerr << "(*it).len is " << std::to_string((*it).len) << std::endl;
+                std::cerr << "s streamlength is " << std::to_string(stream_size) << std::endl;
+                s->read(app.data(), (*it).len);
+                auto got = s->gcount();
+                std::cerr << "got in run_windowed_sliding: " << std::to_string(got) << std::endl;
 
                 uint32_t ts = now_ms();
-                std::vector<uint8_t> pkt(sizeof(RmHeader) + app.size());
+                std::vector<uint8_t> pkt(sizeof(RmHeader) + got);
+
                 RmHeader h{}; fill_header(h, (*it).sequence_number, FLG_DATA, /*wnd*/1, ts, 0);
                 serialize_header(h, pkt.data());
                 if (!app.empty()) memcpy(pkt.data() + sizeof(RmHeader), app.data(), got);
@@ -343,7 +362,7 @@ public:
         return true;
     }
 
-    static void run_windowed_sliding_ackthread(PeelSender *p, std::istringstream *dummy_data, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {
+    static void run_windowed_sliding_ackthread(PeelSender *p, std::istream *data, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {
         while (true) {
             // loop condition
             const bool halting = *halt;
@@ -370,15 +389,16 @@ public:
                     std::cerr << "remove: popping back because of ack status true" << std::endl;
                     auto amt = get_num_additional_packets_sendable(window, cwnd);
                     for (int i = 0; i < amt; i++) {
-                        dummy_data->seekg((*lastseq+i)*p->A.max_app_payload);
+                        data->seekg((*lastseq+i)*p->A.max_app_payload);
                         std::vector<char> buf(p->A.max_app_payload);
-                        dummy_data->read(buf.data(), p->A.max_app_payload);
-                        std::streamsize got = dummy_data->gcount();
+                        data->read(buf.data(), p->A.max_app_payload);
+                        std::streamsize got = data->gcount();
                         if (got <= 0) {
                             mutex->unlock();
                             return; // is this right?
                         }
                         add_dummy_elem_to_window(window, lastseq, got);
+                        (*lastseq)++;
                     }
                 }
                 mutex->unlock();
