@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
 
 using Clock = std::chrono::steady_clock;
 
@@ -376,7 +377,7 @@ static std::vector<Endpoint> load_endpoints(const std::string& path, int default
 
 int main(int argc, char** argv) {
     std::string file = "ip.txt";
-    int num_runs = 10;
+    int num_runs = 15;
     int timeout_ms = 3000;
     int default_port = 5001;
 
@@ -419,16 +420,23 @@ int main(int argc, char** argv) {
     std::vector<std::thread> workers;
     workers.reserve(N);
 
-    for (int i = 0; i < N; ++i) {
-        workers.emplace_back([&, i] {
-            for (int r = 0; r < num_runs; ++r) {
-                start_barrier.arrive_and_wait(); // synchronized start
-                results[i] = connect_send_one_packet_and_wait_ack_us(endpoints[i], timeout_ms);
-                done_barrier.arrive_and_wait();  // synchronized end
-            }
-        });
-    }
+	for (int i = 0; i < N; ++i) {
+		workers.emplace_back([&, i] {
+			for (int r = 0; r < num_runs; ++r) {
+				start_barrier.arrive_and_wait(); // synchronized start
 
+				results[i] =
+					connect_send_one_packet_and_wait_ack_us(
+						endpoints[i], timeout_ms);
+
+				done_barrier.arrive_and_wait();  // synchronized end
+				// 0.5 ms sleep at end of iteration
+				std::this_thread::sleep_for(std::chrono::microseconds(500));
+
+			}
+		});
+	}
+	
     long long min_batch_max = std::numeric_limits<long long>::max();
     long long max_batch_max = 0;
     long long sum_batch_max = 0;
@@ -483,7 +491,7 @@ int main(int argc, char** argv) {
 
     if (batch_success_runs > 0) {
         double avg = static_cast<double>(sum_batch_max) / batch_success_runs;
-        std::cout << "=== Summary of slowest-per-run (your benchmark metric) ===\n"
+        std::cout << "=== Benchmark Summary - Ping-Pong Test ===\n"
                   << "  successful runs: " << batch_success_runs << "/" << num_runs << "\n"
                   << "  min(slowest) = " << min_batch_max << " us\n"
                   << "  max(slowest) = " << max_batch_max << " us\n"

@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 
 
 using Clock = std::chrono::steady_clock;
@@ -399,7 +400,7 @@ static std::vector<Endpoint> load_endpoints(const std::string& path, int default
 
 int main(int argc, char** argv) {
     std::string file = "ip.txt";
-    int num_runs = 10;
+    int num_runs = 15;
     int timeout_ms = 3000;
     int default_port = 5001;
 
@@ -460,7 +461,10 @@ int main(int argc, char** argv) {
 					endpoints[i], payload.data(), payload.size(), timeout_ms);
 
 				done_barrier.arrive_and_wait();  // synchronized end
+
 			}
+			// 0.5 ms sleep at end of iteration
+			//std::this_thread::sleep_for(std::chrono::microseconds(300));
 		});
     }
 
@@ -481,26 +485,28 @@ int main(int argc, char** argv) {
         int slowest_idx = -1;
         int success_cnt = 0;
 
-        for (int i = 0; i < N; ++i) {
-            const auto& ep = endpoints[i];
-            const auto& rs = results[i];
+		for (int i = 0; i < N; ++i) {
+			const auto& ep = endpoints[i];
+			const auto& rs = results[i];
 
-            if (rs.success) {
-                success_cnt++;
-                double ms = rs.us / 1000.0;
-                std::cout << "  " << std::left << std::setw(28) << ep.label()
-                          << "  " << std::right << std::setw(10) << rs.us
-                          << " us (" << ms << " ms)\n";
-                if (rs.us > slowest_us) {
-                    slowest_us = rs.us;
-                    slowest_idx = i;
-                }
-            } else {
-                std::cout << "  " << std::left << std::setw(28) << ep.label()
-                          << "  FAILED: " << (ep.resolved ? rs.err : ep.resolve_err) << "\n";
-            }
-        }
+			if (rs.success) {
+				success_cnt++;
+				double ms = rs.us / 1000.0;
+				std::cout << "  " << std::left << std::setw(28) << ep.label()
+						  << "  " << std::right << std::setw(10) << rs.us
+						  << " us (" << ms << " ms)\n";
+				if (rs.us > slowest_us) {
+					slowest_us = rs.us;
+					slowest_idx = i;
+				}
+			} else {
+				std::cout << "  " << std::left << std::setw(28) << ep.label()
+						  << "  FAILED: "
+						  << (ep.resolved ? rs.err : ep.resolve_err) << "\n";
+			}
 
+		}
+		
         if (success_cnt > 0) {
             std::cout << "  -> Slowest successful (invoke->finish): "
                       << endpoints[slowest_idx].label()
@@ -520,7 +526,7 @@ int main(int argc, char** argv) {
 
     if (batch_success_runs > 0) {
         double avg = static_cast<double>(sum_batch_max) / batch_success_runs;
-        std::cout << "=== Summary of slowest-per-run (your benchmark metric) ===\n"
+        std::cout << "=== Benchmark Summary - Dummy Layer TCP ===\n"
                   << "  successful runs: " << batch_success_runs << "/" << num_runs << "\n"
                   << "  min(slowest) = " << min_batch_max << " us\n"
                   << "  max(slowest) = " << max_batch_max << " us\n"

@@ -201,12 +201,12 @@ public:
                 continue;
             }
 
-            //if (flags & FLG_START) {
-            //    started = true;
-            //    std::cerr << "START received. Entering data phase.\n";
+            if (flags & FLG_START) {
+                started = true;
+                std::cerr << "START received. Entering data phase.\n";
                 // No ACK required for START in this protocol
-            //    continue;
-            //}
+                continue;
+            }
 
             if (!started && (flags & (FLG_DATA | FLG_FIN))) {
                 // Be robust: still ACK, but do not deliver payload if not started

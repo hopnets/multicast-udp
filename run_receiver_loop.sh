@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IP_PREFIX="10.169.144."
+
+# Allow clean exit on Ctrl+C
+trap 'echo "Stopping receiver loop."; exit 0' INT
+
+# Find the first IPv4 address on this host that starts with 10.169.144.
+iface_ip=$(
+  ip -4 -o addr show \
+  | awk -v prefix="$IP_PREFIX" '
+      index($4, prefix) == 1 {
+        sub(/\/.*/, "", $4);
+        print $4;
+        exit;
+      }
+    '
+)
+
+if [[ -z "${iface_ip:-}" ]]; then
+  echo "ERROR: No IPv4 address starting with ${IP_PREFIX} found on this host." >&2
+  exit 1
+fi
+
+echo "Using iface IP: ${iface_ip}"
+
+# Extract last octet for filename, e.g. 10.169.144.16 → 16
+last_octet="${iface_ip##*.}"
+
+mkdir -p receiver_outputs
+out_file="receiver_outputs/r1.bin_${last_octet}"
+echo "Output file: ${out_file}"
+
+echo "Starting peel_receiver loop (Ctrl+C to stop)..."
+
+while true; do
+  ./build/peel_receiver \
+    --group 239.255.0.1 \
+    --port 5000 \
+    --out "${out_file}" \
+    --iface "${iface_ip}"
+
+  echo "peel_receiver exited. Restarting in 1 second..."
+  sleep 1
+done
