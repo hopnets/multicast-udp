@@ -327,16 +327,17 @@ public:
             for (auto it = window.begin(); it != window.end(); it++) {
                 long start = ((*it).sequence_number-1)* A.max_app_payload;
                 auto end = start + (*it).len;
-                std::cerr << "start in run_windowed_sliding: " << std::to_string(start) << std::endl;
+                // std::cerr << "start in run_windowed_sliding: " << std::to_string(start) << std::endl;
                 s->clear();
                 s->seekg(start, std::ios::beg);
                 std::vector<char> app(A.max_app_payload);
                 assert((*it).len <= app.size());
-                std::cerr << "(*it).len is " << std::to_string((*it).len) << std::endl;
-                std::cerr << "s streamlength is " << std::to_string(stream_size) << std::endl;
+                // std::cerr << "(*it).len is " << std::to_string((*it).len) << std::endl;
+                // std::cerr << "s streamlength is " << std::to_string(stream_size) << std::endl;
                 s->read(app.data(), (*it).len);
                 auto got = s->gcount();
-                std::cerr << "got in run_windowed_sliding: " << std::to_string(got) << std::endl;
+                std::cerr << "successfully read " + std::to_string(got) + " characters from the input file" << std::endl;
+                // std::cerr << "got in run_windowed_sliding: " << std::to_string(got) << std::endl;
 
                 uint32_t ts = now_ms();
                 std::vector<uint8_t> pkt(sizeof(RmHeader) + got);
@@ -355,9 +356,12 @@ public:
             mutex.unlock();
             // wait the retry duration
 
+            std::cerr << "sleeping for " << std::to_string(A.rto_ms) << " ms" << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(A.rto_ms));
         }
+        mutex.lock();
         halt = true;
+        mutex.unlock();
         ackthread.join();
         return true;
     }
@@ -373,14 +377,24 @@ public:
             auto [res, seq] = p->wait_for_ack();
             if (res) {
                 mutex->lock();
-                for (auto it = window->begin(); it != window->end(); it++) {
-                    if ((*it).sequence_number == seq) {
+                for (auto & it : *window) {
+                    if (it.sequence_number == seq) {
                         std::cerr << "listen: received ack for seq number " << seq << std::endl;
-                        (*it).ack_status = true;
+                        it.ack_status = true;
+                        break; // invariant: all packets in the window have sequence numbers that are only seen once
                     }
                 }
                 // clean up the window, if empty, break
-                while (!window->empty()) {
+                auto cant_add_more_elems = false;
+                while (!window->empty() && !cant_add_more_elems) {
+                    auto elem_count = window->size();
+                    std::cerr << "window has " << elem_count << " elements" << std::endl;
+                    if (elem_count > 0) {
+                        std::cerr << "enumerating window elements" << std::endl;
+                        for (WindowEntry &it : *window) {
+                            std::cerr << "found element with sequence number " << it.sequence_number << std::endl;
+                        }
+                    }
                     auto front = window->front();
                     if (front.ack_status != true) {
                         break;
@@ -394,8 +408,11 @@ public:
                         data->read(buf.data(), p->A.max_app_payload);
                         std::streamsize got = data->gcount();
                         if (got <= 0) {
+                            // if we can't add dummy elems, don't, and break from the for loop
                             mutex->unlock();
-                            return; // is this right?
+                            //return;
+                            cant_add_more_elems = true;
+                            break;
                         }
                         add_dummy_elem_to_window(window, lastseq, got);
                         (*lastseq)++;
