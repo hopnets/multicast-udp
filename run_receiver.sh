@@ -7,10 +7,10 @@ IP_PREFIX="10.169.144."
 iface_ip=$(
   ip -4 -o addr show \
   | awk -v prefix="$IP_PREFIX" '
-      index($4, prefix) == 1 {       # address field starts with the prefix
-        sub(/\/.*/, "", $4);         # strip /mask (e.g. /24)
+      index($4, prefix) == 1 {
+        sub(/\/.*/, "", $4);
         print $4;
-        exit;                        # use the first match
+        exit;
       }
     '
 )
