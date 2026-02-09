@@ -363,7 +363,7 @@ public:
         halt = true;
         mutex.unlock();
         ackthread.join();
-        return true;
+        return send_fin(++seq);
     }
 
     static void run_windowed_sliding_ackthread(PeelSender *p, std::istream *data, std::list<WindowEntry> *window, std::mutex *mutex, std::atomic<bool> *halt, int cwnd, uint32_t *lastseq) {

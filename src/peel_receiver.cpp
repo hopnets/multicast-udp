@@ -31,10 +31,12 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 #include <random>
+#include <thread>
 
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
@@ -66,7 +68,8 @@ enum : uint16_t {
     FLG_RST   = 0x0020,
 };
 
-auto NUM_PACKETS_CAPACITY = 512;
+const int RECV_WINDOW_CAPACITY = 128;
+const int RECV_WINDOW_INITIAL_SIZE = 15;
 
 static uint32_t now_ms() {
     auto now = Clock::now().time_since_epoch();
@@ -127,6 +130,7 @@ public:
     ~PeelReceiver() { if (fd >= 0) close(fd); if (ofs.is_open()) ofs.close(); }
 
     const bool unreliable_mode_for_sender_testing = true;
+    std::mutex mutex;
 
     bool init() {
         fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -176,9 +180,23 @@ public:
         bool started = false;
         uint32_t delivered = 0; // last in-order seq delivered
         uint64_t total_bytes = 0;
-
         std::vector<uint8_t> buf(65536);
-        RecvrWindowEntry recv[] = {}; 
+
+        uint last_seq_in_window = 0;
+        int head = 0; // head is ahead of tail
+        int tail = RECV_WINDOW_CAPACITY-1;
+        RecvrWindowEntry recv_window[RECV_WINDOW_CAPACITY] = {}; // TODO: replace this value with a value that the sender window will not expand past
+        for (int i = 0; i < RECV_WINDOW_INITIAL_SIZE; i++) {
+            last_seq_in_window++;
+            recv_window[head] = RecvrWindowEntry{
+                last_seq_in_window,
+                false,
+            };
+            head++;
+        }
+        head--;
+
+        // std::thread wmThread(windowManagementThread, this);
         while (true) {
             sockaddr_in peer{}; socklen_t alen = sizeof(peer);
             ssize_t n = recvfrom(fd, buf.data(), buf.size(), 0, (sockaddr*)&peer, &alen);
@@ -229,46 +247,84 @@ public:
                 continue;
             }
 
-            if (flags & FLG_DATA) {
-                // Stop-and-wait expectation: next seq should be delivered+1
-                if (seq == delivered + 1) {
-                    if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
-                        std::cerr << "not sending syn/ack because of deliberately introduced unreliability (testing the sender)" << std::endl;
-                        continue;
-                    }
-                    size_t app_len = (size_t)n - sizeof(RmHeader);
-                    if (app_len > 0) {
-                        if (ofs.is_open()) ofs.write(reinterpret_cast<const char*>(buf.data() + sizeof(RmHeader)), (std::streamsize)app_len);
-                        total_bytes += app_len;
-                    }
-                    delivered = seq;
-                    send_ack(ack_to, seq, FLG_ACK, tsval);
-                    std::cerr << "DATA seq=" << seq << " len=" << (n - (ssize_t)sizeof(RmHeader)) << " -> delivered, total=" << total_bytes << " bytes\n";
-                } else if (seq == delivered) {
-                    // Duplicate; re-ACK
-                    if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
-                        std::cerr << "not sending ack because of deliberately introduced unreliability (testing the sender)" << std::endl;
-                        continue;
-                    }
-                    send_ack(ack_to, seq, FLG_ACK, tsval);
-                    std::cerr << "Duplicate DATA seq=" << seq << " -> re-ACK\n";
-                } else {
-                    // Out-of-order (> delivered+1) should not happen in stop-and-wait; ignore to trigger retransmit
-                    // send_ack(ack_to, seq, FLG_ACK, tsval);
-                    std::cerr << "Out-of-order DATA seq=" << seq << " (expected " << (delivered+1) << ") -> sending ACK (accepting out-of-order packets) \n";
-                }
-                continue;
-            }
-
             if (flags & FLG_FIN) {
                 // ACK and exit
                 send_ack(ack_to, seq, FLG_ACK, tsval);
                 std::cerr << "FIN seq=" << seq << " -> ACKed. Total received=" << total_bytes << " bytes\n";
                 return true;
             }
+
+            if (flags & FLG_DATA) {
+                // Stop-and-wait expectation: next seq should be delivered+1
+
+                if (unreliable_mode_for_sender_testing && std::rand() % 4 == 0) {
+                    std::cerr << "not sending syn/ack for packet w/ seq=" << std::to_string(seq) << " because of deliberately introduced unreliability (testing the sender)" << std::endl;
+                    continue;
+                }
+                size_t app_len = (size_t)n - sizeof(RmHeader);
+                if (app_len > 0) {
+                    if (ofs.is_open()) ofs.write(reinterpret_cast<const char*>(buf.data() + sizeof(RmHeader)), (std::streamsize)app_len);
+                    total_bytes += app_len;
+                }
+                // delivered = seq;
+
+                // mutex.lock();
+                auto found = false;
+                std::cerr << "window contains these elements: " << std::endl;
+                for (int i = 0; i < RECV_WINDOW_INITIAL_SIZE; i++) {
+                    int ind = (tail + 1 + i) % RECV_WINDOW_CAPACITY;
+                    std::cerr << "ind: " << std::to_string(ind) << std::endl;
+                    std::cerr << "seq: " << std::to_string(recv_window[ind].seq) << std::endl;
+                }
+                for (int i = 0; i < RECV_WINDOW_INITIAL_SIZE; i++) {
+                    int ind = (tail + 1 + i) % RECV_WINDOW_CAPACITY;
+                    auto current = &recv_window[ind];
+                    if (current->seq == seq) {
+                        found = true;
+                        if (!current->acked) {
+                            send_ack(ack_to, seq, FLG_ACK, tsval);
+                            current->acked = true;
+                            std::cerr << "DATA seq=" << seq << " len=" << (n - (ssize_t)sizeof(RmHeader)) << " -> delivered, total=" << total_bytes << " bytes\n";
+                        } else {
+                            send_ack(ack_to, seq, FLG_ACK, tsval);
+                            std::cerr << "packet w/ seq " << std::to_string(seq) << "received but already acked; resending ACK" << std::endl;
+                        }
+                        break;
+                    }
+                }
+                // mutex.unlock();
+                if (!found) {
+                    std::cerr << "received packet (seq " << std::to_string(seq) << ") that wasn't expected; no ACK sent" << std::endl;
+                }
+            }
+
+            // after processing the received packet
+            while (recv_window[(tail+1) % RECV_WINDOW_CAPACITY].acked == true) {
+                recv_window[(tail+1) % RECV_WINDOW_CAPACITY] = RecvrWindowEntry {
+                    UINT32_MAX,
+                    false,
+                };
+                tail = (tail + 1) % RECV_WINDOW_CAPACITY;
+                head = (head + 1) % RECV_WINDOW_CAPACITY; // tail should never pass head with this
+                std::cerr << "last_seq_in_window is " << std::to_string(last_seq_in_window+1) << std::endl;
+                recv_window[head] = RecvrWindowEntry {
+                    ++last_seq_in_window,
+                    false,
+                };
+            }
+
         }
         return true;
     }
+
+    //
+    /* static void windowManagementThread(PeelReceiver *p, RecvrWindowEntry window[], bool halt) {
+        while (!halt) {
+            mutex.lock();
+
+            mutex.unlock();
+        }
+    } */
 
 private:
     bool verify_header(const RmHeader& net) {
