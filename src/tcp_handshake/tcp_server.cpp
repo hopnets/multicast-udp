@@ -8,8 +8,7 @@
 #include <netinet/in.h>
 
 int main(int argc, char** argv) {
-    int port = 5001; // you can change this if you like
-    if (argc > 1) {
+    int port = 5001; 
         port = std::stoi(argv[1]);
     }
 
