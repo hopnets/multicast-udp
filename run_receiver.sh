@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IP_PREFIX="10.169.144."
+IP_PREFIX="10.161.159."
 
-# Find the first IPv4 address on this host that starts with 10.169.144.
+# Find the first IPv4 address on this host that starts with 10.161.159.
 iface_ip=$(
   ip -4 -o addr show \
   | awk -v prefix="$IP_PREFIX" '
@@ -22,7 +22,7 @@ fi
 
 echo "Using iface IP: ${iface_ip}"
 
-# Extract last octet for filename, e.g. 10.169.144.16 → 16
+# Extract last octet for filename, e.g. 10.161.159.16 → 16
 last_octet="${iface_ip##*.}"
 
 mkdir -p receiver_outputs
