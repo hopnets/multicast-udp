@@ -117,9 +117,9 @@ struct Args {
 };
 
 static void usage(const char* prog) {
-    std::cerr << "Usage: " << prog
-              << " --group A.B.C.D --port P --sender-port S --expected N"
-              << " [--iface X.Y.Z.W] [--ttl T] [--rto-ms MS] [--retries K]\n";
+    //std::cerr << "Usage: " << prog
+    //          << " --group A.B.C.D --port P --sender-port S --expected N"
+    //          << " [--iface X.Y.Z.W] [--ttl T] [--rto-ms MS] [--retries K]\n";
 }
 
 static bool parse_args(int argc, char** argv, Args& a) {
@@ -371,7 +371,7 @@ int main(int argc, char** argv) {
     if (!s.init()) return 2;
 
     // Run 10 handshakes with 500ms gap, print per-run durations + average
-    if (!s.benchmark_handshake(100, 500ms)) return 3;
+    if (!s.benchmark_handshake(10, 0ms)) return 3;
 
     return 0;
 }

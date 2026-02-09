@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IP_PREFIX="10.169.144."
+IP_PREFIX="10.161.159."
 
 # -------------------------------
 # Parse command-line arguments
