@@ -9,6 +9,6 @@ mkdir -p receiver_outputs
 out_file="receiver_outputs/r1.bin"
 echo "Output file: ${out_file}"
 
-./build/peel_receiver \
+./build/reno_receiver \
   --port 5000 \
   --out "${out_file}"
