@@ -186,6 +186,7 @@ private:
         // Phase 1: wait for SYN, send SYN|ACK
         uint32_t syn_tsval = 0;
         bool got_syn = false;
+        RenoHeader rh{};
         while (!got_syn) {
             std::vector<uint8_t> buf(sizeof(RenoHeader) + 16);
             sockaddr_in from{};
@@ -199,7 +200,7 @@ private:
             }
             if ((size_t)n < sizeof(RenoHeader)) continue;
 
-            RenoHeader rh{};
+
             memcpy(&rh, buf.data(), sizeof(rh));
             if (!verify_header(rh)) continue;
 
@@ -216,14 +217,17 @@ private:
             std::cerr << "SYN received from " << addr_str(from)
                       << " (ACKs -> :" << ntohs(sender.sin_port) << ")\n";
         }
-
+        sockaddr_in ack_to{};
         // Phase 2: send SYN|ACK and wait for ACK, retry if needed
         for (int attempt = 0; attempt <= A.retries; ++attempt) {
             uint32_t ts = now_ms();
             RenoHeader sa{};
             fill_ack(sa, /*seq*/0, /*ack_num*/1, FLG_SYN | FLG_ACK,
                      A.rwnd, ts, syn_tsval);
-            send_pkt(sa, nullptr, 0);
+            ack_to.sin_family = AF_INET;
+            ack_to.sin_addr   = sender.sin_addr;
+            ack_to.sin_port   = rh.src_port; // network order
+            send_pkt(ack_to, sa, nullptr, 0);
 
             std::cerr << "SYN|ACK sent (attempt " << (attempt + 1) << ")\n";
 
@@ -251,8 +255,6 @@ private:
                     perror("recvfrom handshake ACK"); return false;
                 }
                 if ((size_t)n < sizeof(RenoHeader)) continue;
-
-                RenoHeader rh{};
                 memcpy(&rh, buf.data(), sizeof(rh));
                 if (!verify_header(rh)) continue;
 
@@ -265,12 +267,13 @@ private:
                     RenoHeader sa2{};
                     fill_ack(sa2, 0, 1, FLG_SYN | FLG_ACK, A.rwnd, ts2,
                              ntohl(rh.tsval));
-                    send_pkt(sa2, nullptr, 0);
+                    send_pkt(ack_to, sa2, nullptr, 0);
                     continue;
                 }
 
                 if (!(flags & FLG_ACK)) continue;
                 if (from.sin_addr.s_addr != sender.sin_addr.s_addr) continue;
+                if (ntohl(rh.ack_num) != 1) continue;
 
                 // Handshake complete
                 std::cerr << "ACK received. Handshake complete. "
