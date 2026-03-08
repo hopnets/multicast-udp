@@ -19,3 +19,5 @@ rm build/peel_sender_handshake
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_sender_handshake src/peel_sender_handshake.cpp
 rm build/reno_sender_bench
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_sender_bench src/reno_sender_bench.cpp
+rm build/reno_receiver
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_receiver src/reno_receiver.cpp
