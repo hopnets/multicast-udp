@@ -430,7 +430,7 @@ private:
                   uint32_t tsecr, uint16_t wnd) {
         RenoHeader a{};
         fill_ack(a, /*seq*/0, ack_num, FLG_ACK, wnd, now_ms(), tsecr);
-        send_pkt(a, nullptr, 0);
+        send_pkt(to, a, nullptr, 0);
     }
 
     void fill_ack(RenoHeader& h, uint32_t seq, uint32_t ack_num,
@@ -446,7 +446,7 @@ private:
         h.tsecr    = htonl(tsecr);
     }
 
-    void send_pkt(RenoHeader& h, const uint8_t* payload, size_t plen) {
+    void send_pkt(const sockaddr_in& to, RenoHeader& h, const uint8_t* payload, size_t plen) {
         // Compute checksum over header with checksum=0
         RenoHeader tmp = h;
         tmp.checksum = 0;
@@ -457,7 +457,7 @@ private:
         if (plen > 0) memcpy(pkt.data() + sizeof(h), payload, plen);
 
         ssize_t n = sendto(fd, pkt.data(), pkt.size(), 0,
-                           (sockaddr*)&sender, sizeof(sender));
+                           (sockaddr*)&to, sizeof(to));
         if (n < 0) perror("sendto ACK");
     }
 
