@@ -20,7 +20,7 @@ echo "Using payload file : ${payload_file}"
 # -------------------------------
 # Run sender
 # -------------------------------
-./build/reno_sender_bench \
+./build/reno_sender \
   --host "10.169.144.15" \
   --port 5000 \
   --sender-port 45000 \
