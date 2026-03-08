@@ -17,3 +17,5 @@ rm build/gen_payload
 g++ -std=c++17 -O3 -Wall -Wextra -o build/gen_payload src/gen_payload.cpp
 rm build/peel_sender_handshake
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_sender_handshake src/peel_sender_handshake.cpp
+rm build/reno_sender_bench
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_sender_bench src/reno_sender_bench.cpp
