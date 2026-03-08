@@ -228,13 +228,66 @@ public:
         return true;
     }
 
+    bool benchmark_ping_pong(const int runs = 100, const int packets_to_send_per_iteration = 1000, std::chrono::milliseconds gap = 500ms) {
+        std::vector<int> handshake_durations = {};
+        std::vector<int> data_ack_durations = {};
+        std::vector<int> fin_ack_durations = {};
+
+        for (int i = 0; i < runs; i++) {
+            auto t0 = Clock::now();
+            if (!handshake()) return false;
+            auto t1 = Clock::now();
+            uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            handshake_durations.push_back(us);
+
+            for (int j = 1; j <= packets_to_send_per_iteration; ++j) {
+                std::string msg = "hello-" + std::to_string(i);
+                all_segs.emplace_back(msg.begin(), msg.end());
+            }
+            auto t2 = Clock::now();
+            if (!transfer()) return false;
+            auto t3 = Clock::now();
+            us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+            auto us_over_packet_count = us/packets_to_send_per_iteration;
+            data_ack_durations.push_back(us_over_packet_count);
+
+            auto t4 = Clock::now();
+            auto ret_code = teardown();
+            auto t5 = Clock::now();
+            if (ret_code == false) {
+                return false;
+            }
+            us = std::chrono::duration_cast<std::chrono::microseconds>(t5 - t4).count();
+            fin_ack_durations.push_back(us);
+        }
+        // take averages
+        uint64_t avg_handshake = 0;
+        uint64_t avg_data_ack = 0;
+        uint64_t avg_fin_ack = 0;
+        for (int i = 0; i < runs; i++) {
+            avg_handshake += handshake_durations[i];
+            avg_data_ack += data_ack_durations[i];
+            avg_fin_ack += fin_ack_durations[i];
+        }
+        avg_handshake = avg_handshake / runs;
+        avg_data_ack = avg_data_ack / runs;
+        avg_fin_ack = avg_fin_ack / runs;
+        printf("----------------------------------------\n");
+        printf("BENCHMARK COMPLETE:\n");
+        printf("average handshake time (us): %lu\n", avg_handshake);
+        printf("average data + ack time (us): %lu\n", avg_data_ack);
+        printf("average fin + ack time (us): %lu\n", avg_fin_ack);
+        printf("----------------------------------------\n");
+        return true;
+    }
+
     bool run() {
         if (!handshake()) return false;
 
         if (!A.file.empty()) {
             if (!load_file(A.file)) return false;
         } else {
-            // Demo mode: 500 messages
+            // Demo mode: 5 messages
             for (int i = 1; i <= 5; ++i) {
                 std::string msg = "hello-" + std::to_string(i);
                 all_segs.emplace_back(msg.begin(), msg.end());
@@ -703,6 +756,6 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 1;
     RenoSender s(args);
     if (!s.init()) return 2;
-    if (!s.benchmark_handshake()) return 3;
+    if (!s.benchmark_ping_pong()) return 3;
     return 0;
 }
