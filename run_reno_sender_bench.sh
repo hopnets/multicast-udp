@@ -20,27 +20,6 @@ payload_file="payloads/payload.bin_${payload_mb}M"
 echo "Using payload file : ${payload_file}"
 
 # -------------------------------
-# Detect interface IP
-# -------------------------------
-iface_ip=$(
-  ip -4 -o addr show \
-  | awk -v prefix="$IP_PREFIX" '
-      index($4, prefix) == 1 {
-        sub(/\/.*/, "", $4);
-        print $4;
-        exit;
-      }
-    '
-)
-
-if [[ -z "${iface_ip:-}" ]]; then
-  echo "ERROR: No IPv4 address starting with ${IP_PREFIX} found." >&2
-  exit 1
-fi
-
-echo "Using iface IP     : ${iface_ip}"
-
-# -------------------------------
 # Run sender
 # -------------------------------
 ./build/reno_sender_bench \
