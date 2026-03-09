@@ -23,3 +23,5 @@ rm build/reno_receiver
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_receiver src/reno_receiver.cpp
 rm build/reno_sender
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_sender src/reno_sender.cpp
+rm build/reno_receiver_bench
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_receiver_bench src/reno_receiver_bench.cpp
