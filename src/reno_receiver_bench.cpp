@@ -482,8 +482,8 @@ int main(int argc, char** argv) {
     Args args;
     if (!parse_args(argc, argv, args)) return 1;
     RenoReceiver r(args);
+    if (!r.init()) return 2;
     while (true) {
-        if (!r.init()) return 2;
         if (!r.run()) return 3;
     }
 }
