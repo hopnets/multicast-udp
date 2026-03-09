@@ -234,7 +234,24 @@ public:
         std::vector<int> fin_ack_durations = {};
 
         for (int i = 0; i < runs; i++) {
+            // reset variables that change between runs (note: this creates two places where these variables need to be set;
+            // change this if this file is used more than anticipated
             cwnd = 1.0;
+            ssthresh      = 64.0;
+            cc_state      = CCState::SLOW_START;
+            dup_ack_count = 0;
+
+            peer_rwnd = 1;
+            snd_una   = 1;
+            snd_nxt   = 1;
+            in_flight.clear();
+
+            all_segs.clear();
+            srtt_ms    = 0.0;
+            rttvar_ms  = 0.0;
+            rto_ms = A.rto_ms;
+            rtt_init   = false;
+
             auto t0 = Clock::now();
             if (!handshake()) return false;
             auto t1 = Clock::now();
