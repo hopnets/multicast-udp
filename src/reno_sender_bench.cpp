@@ -234,6 +234,7 @@ public:
         std::vector<int> fin_ack_durations = {};
 
         for (int i = 0; i < runs; i++) {
+            cwnd = 1.0;
             auto t0 = Clock::now();
             if (!handshake()) return false;
             auto t1 = Clock::now();
