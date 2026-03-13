@@ -319,10 +319,13 @@ public:
             }
             int i = 0;
             for (const auto& vec : run_shapes) {
-                outfile << std::to_string(i) << ", ";
+                outfile << std::to_string(i) << ",";
                 i++;
-                for (const auto cwnd_record : vec) {
-                    outfile << std::to_string(cwnd_record) << ", ";
+                for (int j = 0; j < runs; j++) {
+                    outfile << std::to_string(vec[j]);
+                    if (j != runs - 1) {
+                        outfile << ",";
+                    }
                 }
                 outfile << "\n";
             }
