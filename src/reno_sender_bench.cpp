@@ -321,7 +321,7 @@ public:
             for (const auto& vec : run_shapes) {
                 outfile << std::to_string(i) << ",";
                 i++;
-                for (int j = 0; j < runs; j++) {
+                for (int j = 0; j < packets_to_send_per_iteration; j++) {
                     outfile << std::to_string(vec[j]);
                     if (j != runs - 1) {
                         outfile << ",";
