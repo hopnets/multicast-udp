@@ -228,7 +228,7 @@ public:
         return true;
     }
 
-    bool benchmark_ping_pong(const int runs = 100, const int packets_to_send_per_iteration = 1000, std::chrono::milliseconds gap = 500ms, const bool getting_shape = true) {
+    bool benchmark_ping_pong(const int runs = 10, const int packets_to_send_per_iteration = 10000, std::chrono::milliseconds gap = 500ms, const bool getting_shape = true) {
         std::vector<int> handshake_durations = {};
         std::vector<int> data_ack_durations = {};
         std::vector<int> fin_ack_durations = {};
