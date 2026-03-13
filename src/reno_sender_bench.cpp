@@ -515,12 +515,12 @@ private:
 
         while (snd_una <= total) {
             // Fill the send window with new segments
+            results->push_back(cwnd);
             uint32_t eff = eff_wnd();
             while (snd_nxt <= total && (uint32_t)in_flight.size() < eff) {
                 if (!send_new(snd_nxt)) return false;
                 snd_nxt++;
                 eff = eff_wnd(); // cwnd may have just become a stricter limit
-                results->push_back(cwnd);
             }
 
             if (in_flight.empty()) break; // safety: shouldn't reach if snd_una <= total
