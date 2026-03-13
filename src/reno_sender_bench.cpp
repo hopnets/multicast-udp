@@ -309,7 +309,7 @@ public:
         std::ofstream outfile;
         outfile.open("eff_plot.csv");
         if (!outfile) {
-            printf("Failed to write file. Exiting");
+            printf("Failed to write file. Exiting\n");
             return false;
         }
         int i = 0;
@@ -321,6 +321,8 @@ public:
             }
             outfile << "\n";
         }
+        outfile.close();
+        printf("Wrote file successfully. Exiting.\n");
         return true;
     }
 
