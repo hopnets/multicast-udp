@@ -228,11 +228,12 @@ public:
         return true;
     }
 
-    bool benchmark_ping_pong(const int runs = 100, const int packets_to_send_per_iteration = 1000, std::chrono::milliseconds gap = 500ms) {
+    bool benchmark_ping_pong(const int runs = 100, const int packets_to_send_per_iteration = 1000, std::chrono::milliseconds gap = 500ms, const bool getting_shape = true) {
         std::vector<int> handshake_durations = {};
         std::vector<int> data_ack_durations = {};
         std::vector<int> fin_ack_durations = {};
 
+        std::vector<std::vector<int>> run_shapes = {};
         for (int i = 0; i < runs; i++) {
             // reset variables that change between runs (note: this creates two places where these variables need to be set;
             // change this if this file is used more than anticipated
@@ -252,7 +253,10 @@ public:
             rto_ms = A.rto_ms;
             rtt_init   = false;
 
+            std::vector<int> this_run_results = {};
+
             auto t0 = Clock::now();
+
             if (!handshake()) return false;
             auto t1 = Clock::now();
             uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -262,8 +266,13 @@ public:
                 std::string msg = "hello-" + std::to_string(i);
                 all_segs.emplace_back(msg.begin(), msg.end());
             }
+
             auto t2 = Clock::now();
-            if (!transfer()) return false;
+            if (getting_shape) {
+                if (!transfer_bench(&this_run_results)) return false;
+            } else {
+                if (!transfer()) return false;
+            }
             auto t3 = Clock::now();
             us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
             auto us_over_packet_count = us/packets_to_send_per_iteration;
@@ -295,7 +304,23 @@ public:
         printf("average handshake time (us): %lu\n", avg_handshake);
         printf("average data + ack time (us): %lu\n", avg_data_ack);
         printf("average fin + ack time (us): %lu\n", avg_fin_ack);
-        printf("----------------------------------------\n");
+        printf("----------------------------------------\n\n");
+        printf("Attempting to write effective window values to file");
+        std::ofstream outfile;
+        outfile.open("eff_plot.csv");
+        if (!outfile) {
+            printf("Failed to write file. Exiting");
+            return false;
+        }
+        int i = 0;
+        for (const auto& vec : run_shapes) {
+            outfile << std::to_string(i) << ", ";
+            i++;
+            for (const auto eff_record : vec) {
+                outfile << std::to_string(eff_record) << ", ";
+            }
+            outfile << "\n";
+        }
         return true;
     }
 
@@ -428,6 +453,66 @@ private:
                 if (!send_new(snd_nxt)) return false;
                 snd_nxt++;
                 eff = eff_wnd(); // cwnd may have just become a stricter limit
+            }
+
+            if (in_flight.empty()) break; // safety: shouldn't reach if snd_una <= total
+
+            // Compute time until the oldest in-flight segment expires
+            auto& oldest  = in_flight.begin()->second;
+            auto  expiry  = oldest.sent_at + std::chrono::milliseconds(rto_ms);
+            auto  wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                expiry - Clock::now());
+            if (wait_ms.count() < 0) wait_ms = std::chrono::milliseconds(0);
+
+            uint8_t   buf[sizeof(RenoHeader) + 65536];
+            sockaddr_in from{};
+            ssize_t   n  = 0;
+            int       r  = recv_timed(buf, sizeof(buf), from, n, wait_ms);
+
+            if (r < 0) return false; // socket error
+
+            if (r == 0) {
+                // RTO timeout
+                consec_timeouts++;
+                if (consec_timeouts > A.retries) {
+                    std::cerr << "Transfer failed: " << A.retries
+                              << " consecutive timeouts\n";
+                    return false;
+                }
+                if (!on_timeout()) return false;
+                continue;
+            }
+
+            // Received a packet - validate it
+            if ((size_t)n < sizeof(RenoHeader)) continue;
+            RenoHeader rh{};
+            memcpy(&rh, buf, sizeof(rh));
+            if (!verify_header(rh)) continue;
+            uint16_t flags = ntohs(rh.flags);
+            if ((flags & FLG_ACK) == 0) continue;
+            if (from.sin_addr.s_addr != peer.sin_addr.s_addr) continue;
+
+            on_ack(rh);
+            consec_timeouts = 0;
+        }
+        return true;
+    }
+
+    // transfer(), except it also gives the shape that cwnd follows, which should be sawtooth
+    bool transfer_bench(std::vector<int> *results) {
+        uint32_t total = (uint32_t)all_segs.size();
+        snd_una = 1;
+        snd_nxt = 1;
+        int consec_timeouts = 0;
+
+        while (snd_una <= total) {
+            // Fill the send window with new segments
+            uint32_t eff = eff_wnd();
+            while (snd_nxt <= total && (uint32_t)in_flight.size() < eff) {
+                if (!send_new(snd_nxt)) return false;
+                snd_nxt++;
+                eff = eff_wnd(); // cwnd may have just become a stricter limit
+                results->push_back(eff);
             }
 
             if (in_flight.empty()) break; // safety: shouldn't reach if snd_una <= total
