@@ -253,7 +253,7 @@ public:
             rto_ms = A.rto_ms;
             rtt_init   = false;
 
-            std::vector<int> this_run_results = {};
+
 
             auto t0 = Clock::now();
 
@@ -267,6 +267,7 @@ public:
                 all_segs.emplace_back(msg.begin(), msg.end());
             }
 
+            std::vector<int> this_run_results = {};
             auto t2 = Clock::now();
             if (getting_shape) {
                 if (!transfer_bench(&this_run_results)) return false;
@@ -274,6 +275,9 @@ public:
                 if (!transfer()) return false;
             }
             auto t3 = Clock::now();
+            if (getting_shape) {
+                run_shapes.push_back(this_run_results);
+            }
             us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
             auto us_over_packet_count = us/packets_to_send_per_iteration;
             data_ack_durations.push_back(us_over_packet_count);
@@ -305,24 +309,26 @@ public:
         printf("average data + ack time (us): %lu\n", avg_data_ack);
         printf("average fin + ack time (us): %lu\n", avg_fin_ack);
         printf("----------------------------------------\n\n");
-        printf("Attempting to write effective window values to file");
-        std::ofstream outfile;
-        outfile.open("eff_plot.csv");
-        if (!outfile) {
-            printf("Failed to write file. Exiting\n");
-            return false;
-        }
-        int i = 0;
-        for (const auto& vec : run_shapes) {
-            outfile << std::to_string(i) << ", ";
-            i++;
-            for (const auto eff_record : vec) {
-                outfile << std::to_string(eff_record) << ", ";
+        if (getting_shape) {
+            printf("Attempting to write effective window values to file\n");
+            std::ofstream outfile;
+            outfile.open("eff_plot.csv");
+            if (!outfile) {
+                printf("Failed to write file. Exiting\n");
+                return false;
             }
-            outfile << "\n";
+            int i = 0;
+            for (const auto& vec : run_shapes) {
+                outfile << std::to_string(i) << ", ";
+                i++;
+                for (const auto eff_record : vec) {
+                    outfile << std::to_string(eff_record) << ", ";
+                }
+                outfile << "\n";
+            }
+            outfile.close();
+            printf("Wrote file successfully. Exiting.\n");
         }
-        outfile.close();
-        printf("Wrote file successfully. Exiting.\n");
         return true;
     }
 
