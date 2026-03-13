@@ -310,9 +310,9 @@ public:
         printf("average fin + ack time (us): %lu\n", avg_fin_ack);
         printf("----------------------------------------\n\n");
         if (getting_shape) {
-            printf("Attempting to write effective window values to file\n");
+            printf("Attempting to write cwnd values to file\n");
             std::ofstream outfile;
-            outfile.open("eff_plot.csv");
+            outfile.open("cwnd_plot.csv");
             if (!outfile) {
                 printf("Failed to write file. Exiting\n");
                 return false;
@@ -321,8 +321,8 @@ public:
             for (const auto& vec : run_shapes) {
                 outfile << std::to_string(i) << ", ";
                 i++;
-                for (const auto eff_record : vec) {
-                    outfile << std::to_string(eff_record) << ", ";
+                for (const auto cwnd_record : vec) {
+                    outfile << std::to_string(cwnd_record) << ", ";
                 }
                 outfile << "\n";
             }
@@ -520,7 +520,7 @@ private:
                 if (!send_new(snd_nxt)) return false;
                 snd_nxt++;
                 eff = eff_wnd(); // cwnd may have just become a stricter limit
-                results->push_back(eff);
+                results->push_back(cwnd);
             }
 
             if (in_flight.empty()) break; // safety: shouldn't reach if snd_una <= total
