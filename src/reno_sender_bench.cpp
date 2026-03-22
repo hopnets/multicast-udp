@@ -870,6 +870,6 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, args)) return 1;
     RenoSender s(args);
     if (!s.init()) return 2;
-    if (!s.benchmark_ping_pong()) return 3;
+    if (!s.benchmark_ping_pong(100,1000,500ms, true)) return 3;
     return 0;
 }

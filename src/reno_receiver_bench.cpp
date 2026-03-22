@@ -128,6 +128,8 @@ static bool parse_args(int argc, char** argv, Args& a) {
     return true;
 }
 
+int drop_packets_every_n = 30;
+
 // ─── RenoReceiver ─────────────────────────────────────────────────────────────
 class RenoReceiver {
 public:
@@ -303,6 +305,7 @@ private:
         uint32_t last_tsval = 0;    // most recent tsval seen (echoed in ACKs)
 
         std::vector<uint8_t> buf(65536);
+        uint32_t packets_tried = 0;
         while (true) {
             sockaddr_in from{};
             socklen_t alen = sizeof(from);
@@ -332,10 +335,16 @@ private:
             ack_to.sin_addr   = sender.sin_addr;
             ack_to.sin_port   = rh.src_port; // network order
 
+            packets_tried++;
             if (flags & FLG_DATA) {
                 last_tsval = tsval;
 
                 if (seq == rcv_nxt) {
+                    // at intervals (if given), drop data packets to check if the sender cwnd follows a sawtooth pattern
+                    if (drop_packets_every_n > 0 && packets_tried % drop_packets_every_n == 0) {
+                        continue;
+                    }
+
                     // In-order segment: deliver and drain ooo buffer
                     size_t app_len = (size_t)n - sizeof(RenoHeader);
                     if (app_len > 0) {
