@@ -342,6 +342,7 @@ private:
                 if (seq == rcv_nxt) {
                     // at intervals (if given), drop data packets to check if the sender cwnd follows a sawtooth pattern
                     if (drop_packets_every_n > 0 && packets_tried % drop_packets_every_n == 0) {
+                        std::cout << "dropping packet with packets_tried=" << packets_tried << std::endl;
                         continue;
                     }
 
