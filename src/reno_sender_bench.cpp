@@ -323,7 +323,7 @@ public:
                 i++;
                 for (int j = 0; j < packets_to_send_per_iteration; j++) {
                     outfile << std::to_string(vec[j]);
-                    if (j != runs - 1) {
+                    if (j != packets_to_send_per_iteration - 1) {
                         outfile << ",";
                     }
                 }
