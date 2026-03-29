@@ -26,6 +26,6 @@ g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_receiver_bench src/reno
 rm build/reno_sender_bench
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_sender_bench src/reno_sender_bench.cpp
 rm build/peel_sender_raw_bench
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_receiver_bench src/peel_sender_raw_bench.cpp
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_sender_raw_bench src/peel_sender_raw_bench.cpp
 rm build/peel_receiver_raw_bench
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/reno_sender_bench src/peel_receiver_raw_bench.cpp
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_receiver_raw_bench src/peel_receiver_raw_bench.cpp
