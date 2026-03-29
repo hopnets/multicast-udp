@@ -558,6 +558,7 @@ public:
         printf("average data + ack time (us): %lu\n", avg_data_ack);
         printf("average fin + ack time (us): %lu\n", avg_fin_ack);
         printf("----------------------------------------\n\n");
+        return true;
     }
 
 private:
@@ -845,6 +846,6 @@ int main(int argc, char** argv) {
     // Optional: override dst MAC with custom routing labels here, e.g.:
     //   uint8_t labels[6] = {0x01, zone, rack, slot, port, 0x00};
     //   set_custom_dst_mac(s.dst_mac, labels);
-    if (!s.run()) return 3;
+    if (!s.benchmark_raw()) return 3;
     return 0;
 }
