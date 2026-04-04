@@ -29,3 +29,7 @@ rm build/peel_sender_raw_bench
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_sender_raw_bench src/peel_sender_raw_bench.cpp
 rm build/peel_receiver_raw_bench
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/peel_receiver_raw_bench src/peel_receiver_raw_bench.cpp
+rm build/mcast_reno_sender
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/mcast_reno_sender src/mcast_reno_sender.cpp
+rm build/mcast_reno_receiver
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -o build/mcast_reno_receiver src/mcast_reno_receiver.cpp
