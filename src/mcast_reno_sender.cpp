@@ -735,7 +735,11 @@ private:
                     uint32_t new_min = 0xFFFFu;
                     for (auto& [k, w] : agg.peer_rwnd)
                         if (w < new_min) new_min = w;
-                    agg.min_rwnd = new_min;
+
+                    if (new_min != agg.min_rwnd) {
+                        agg.min_rwnd = new_min;
+                        agg.cv.notify_all();
+                    }
                 }
             }
 
@@ -843,6 +847,8 @@ private:
 
         RenoSM reno; // Reno State Machine — main thread only
 
+        uint32_t last_known_min_rwnd = 0xFFFF;
+
         while (true) {
             // ── Completion ───────────────────────────────────────────────────
             {
@@ -852,17 +858,15 @@ private:
 
             // ── Read current snd_una and receiver window ──────────────────────
             uint32_t committed;
-            uint32_t min_rwnd;
             {
                 std::lock_guard<std::mutex> lk(agg.mtx);
                 committed = agg.committed_una;
-                min_rwnd  = agg.min_rwnd;
             }
 
             // ── Req 1 / 2: fill send window ───────────────────────────────────
             // Effective window = min(cwnd, min_rwnd) — flow control from the most
             // constrained receiver caps the CC window.
-            uint32_t eff_wnd = std::min(reno.window_size(), min_rwnd);
+            uint32_t eff_wnd = std::min(reno.window_size(), last_known_min_rwnd);
             while (snd_nxt <= total &&
                    snd_nxt < committed + eff_wnd) {
                 if (!send_segment(snd_nxt)) return false;
@@ -873,7 +877,7 @@ private:
                 snd_nxt++;
             }
 
-            if (in_flight.empty()) break; // safety
+            // if (in_flight.empty() && agg.committed_una > total) break; // safety
 
             // ── RTO deadline: oldest in-flight segment ────────────────────────
             // in_flight holds only {sent_at, tsval, retrans_id}; payload lives in
@@ -895,9 +899,11 @@ private:
             bool woke_up = agg.cv.wait_for(lk, wait_dur, [&] {
                 return agg.committed_una   > prev_committed ||
                        agg.first_ack_count > 0             ||
-                       agg.fast_retransmit_needed;
+                       agg.fast_retransmit_needed           ||
+                       agg.min_rwnd < last_known_min_rwnd;
             });
             uint32_t new_committed = agg.committed_una;
+            uint32_t current_min_rwnd = agg.min_rwnd;
 
             // Drain all pending signals under the same lock.
             if (agg.first_ack_count > 0) {
@@ -915,6 +921,8 @@ private:
                 agg.tsecr_valid = false;
             }
             lk.unlock();
+
+            last_known_min_rwnd = current_min_rwnd;
 
             // ── RTT update (Karn's: tsecr set only for non-retransmit ACKs) ───
             if (have_tsecr && tsecr_sample != 0) {
