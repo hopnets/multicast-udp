@@ -434,6 +434,7 @@ public:
 
 private:
     // ─── Helpers — identical to peel_receiver ────────────────────────────────
+    uint32_t last_acked_seq = 0;
 
     bool verify_header(const RmHeader& net) {
         RmHeader tmp = net; uint16_t r = tmp.checksum;
@@ -463,7 +464,8 @@ private:
         a.checksum = checksum16(&tmp, sizeof(tmp));
 
         bool is_data_ack = (flags == FLG_ACK) && !(flags & (FLG_SYN | FLG_FIN));
-        if (is_data_ack && A.ack_drop_rate > 0.0f) {
+        auto is_forward_prog = is_data_ack && (seq > last_acked_seq);
+        if (is_forward_prog && A.ack_drop_rate > 0.0f) {
             float r = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
             if (r < A.ack_drop_rate) {
                 std::cerr << "  [DROP] ACK seq=" << seq
@@ -471,6 +473,7 @@ private:
                 return;
             }
         }
+        if (is_data_ack) last_acked_seq = std::max(last_acked_seq, seq);
 
         ssize_t n = sendto(fd, &a, sizeof(a), 0,
                            (const sockaddr*)&to, sizeof(to));
