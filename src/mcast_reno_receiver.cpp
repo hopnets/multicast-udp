@@ -145,7 +145,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (s == "--ack-drop-rate" && need(1)) a.ack_drop_rate = std::stof(argv[++i]);
         else if (s == "-h" || s == "--help") { usage(argv[0]); return false; }
         else { std::cerr << "Unknown arg: " << s << "\n"; usage(argv[0]); return false; }
-    }
+    }srand(static_cast<unsigned>(time(nullptr)));
     return true;
 }
 
@@ -226,6 +226,7 @@ public:
         // Respond to SYN with SYN|ACK, then wait for START before data phase.
         // ════════════════════════════════════════════════════════════════════
         bool started = false;
+        srand(static_cast<unsigned>(time(nullptr)));
 
         // rcv_nxt: the next segment seq we expect.
         // Starts at 0 (not yet in data phase); set to 1 on START (or implicit start).
