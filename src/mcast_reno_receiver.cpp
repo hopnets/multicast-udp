@@ -263,7 +263,7 @@ public:
             uint16_t sender_port_hdr = ntohs(h.src_port);
             uint8_t  retrans_id      = h.retrans_id;
 
-            if (deliberately_introducing_unreliability && (std::rand() * 4) < 1) {
+            if (deliberately_introducing_unreliability && (std::rand() % 4)) {
                 printf("skipping packet with sequence number %d", seq);
                 continue; // ignore the incoming packet
             }
