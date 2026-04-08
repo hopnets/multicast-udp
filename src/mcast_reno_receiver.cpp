@@ -111,6 +111,7 @@ static std::string addr_to_string(const sockaddr_in& a) {
 
 // ─── Args — identical to peel_receiver, plus --ooo-buf ───────────────────────
 struct Args {
+
     std::string group   = "239.255.0.1";
     uint16_t    port    = 5000;
     std::optional<std::string> iface_ip;
@@ -119,6 +120,7 @@ struct Args {
     // Max number of out-of-order segments to buffer.
     // Advertised as the receive window to the sender.
     uint32_t    ooo_buf = 64;
+    float ack_drop_rate = 0.0f;
 };
 
 static void usage(const char* prog) {
@@ -140,6 +142,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (s == "--out"     && need(1)) a.out_path = argv[++i];
         else if (s == "--rcvbuf"  && need(1)) a.rcvbuf   = std::stoi(argv[++i]);
         else if (s == "--ooo-buf" && need(1)) a.ooo_buf  = (uint32_t)std::stoul(argv[++i]);
+        else if (s == "--ack-drop-rate" && need(1)) a.ack_drop_rate = std::stof(argv[++i]);
         else if (s == "-h" || s == "--help") { usage(argv[0]); return false; }
         else { std::cerr << "Unknown arg: " << s << "\n"; usage(argv[0]); return false; }
     }
@@ -241,8 +244,6 @@ public:
 
         std::vector<uint8_t> buf(65536);
 
-        auto deliberately_introducing_unreliability = true;
-
         while (true) {
             sockaddr_in peer{}; socklen_t alen = sizeof(peer);
             ssize_t n = recvfrom(fd, buf.data(), buf.size(), 0,
@@ -263,10 +264,6 @@ public:
             uint16_t sender_port_hdr = ntohs(h.src_port);
             uint8_t  retrans_id      = h.retrans_id;
 
-            if (deliberately_introducing_unreliability && (std::rand() % 4)) {
-                printf("skipping packet with sequence number %d", seq);
-                continue; // ignore the incoming packet
-            }
 
             // ACK destination: sender IP from packet, sender's bound port from header.
             sockaddr_in ack_to{};
@@ -463,6 +460,16 @@ private:
 
         RmHeader tmp = a; tmp.checksum = 0;
         a.checksum = checksum16(&tmp, sizeof(tmp));
+
+        bool is_data_ack = (flags == FLG_ACK) && !(flags & (FLG_SYN | FLG_FIN));
+        if (is_data_ack && A.ack_drop_rate > 0.0f) {
+            float r = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+            if (r < A.ack_drop_rate) {
+                std::cerr << "  [DROP] ACK seq=" << seq
+                          << " retrans_id=" << (int)retrans_id_in << "\n";
+                return;
+            }
+        }
 
         ssize_t n = sendto(fd, &a, sizeof(a), 0,
                            (const sockaddr*)&to, sizeof(to));
