@@ -241,6 +241,8 @@ public:
 
         std::vector<uint8_t> buf(65536);
 
+        auto deliberately_introducing_unreliability = true;
+
         while (true) {
             sockaddr_in peer{}; socklen_t alen = sizeof(peer);
             ssize_t n = recvfrom(fd, buf.data(), buf.size(), 0,
@@ -260,6 +262,11 @@ public:
             uint32_t tsval           = ntohl(h.tsval);
             uint16_t sender_port_hdr = ntohs(h.src_port);
             uint8_t  retrans_id      = h.retrans_id;
+
+            if (deliberately_introducing_unreliability && (std::rand() * 4) < 1) {
+                printf("skipping packet with sequence number %d", seq);
+                continue; // ignore the incoming packet
+            }
 
             // ACK destination: sender IP from packet, sender's bound port from header.
             sockaddr_in ack_to{};
