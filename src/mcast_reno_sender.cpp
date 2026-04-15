@@ -756,21 +756,30 @@ private:
 
                 // ── Req 1: credit ack_count; detect first-ACK events ──────────
                 uint32_t local_first_acks = 0;
-                for (uint32_t s = peer_prev; s < cum_ack; ++s) {
-                    AckSlot* slot = agg.ack_wnd.get(s);
-                    if (!slot) continue;
-                    slot->ack_count++;
-                    if (!slot->first_ack_done) {
-                        slot->first_ack_done = true;
-                        agg.first_ack_count++;
-                        local_first_acks++;
+                if (cum_ack > peer_prev) {
+                    for (uint32_t s = peer_prev; s < cum_ack; ++s) {
+                        AckSlot* slot = agg.ack_wnd.get(s);
+                        if (!slot) continue;
+                        // if (pkt_rid < slot->retrans_id) continue;
+                        slot->ack_count++;
+                        if (!slot->first_ack_done) {
+                            slot->first_ack_done = true;
+                            agg.first_ack_count++;
+                        }
                     }
                 }
 
                 pit->second = cum_ack;
 
                 // ── Req 2: recompute committed_una = min(peer_cum_ack) ────────
-                uint32_t new_committed = compute_committed_una();
+
+                uint32_t new_committed = agg.committed_una;
+                while (true) {
+                    const AckSlot* s = agg.ack_wnd.get(new_committed);
+                    if (!s || s->ack_count < (uint32_t)cohort.size()) break;
+                    new_committed++;
+                }
+                // uint32_t new_committed = compute_committed_una();
                 bool     advanced      = (new_committed > agg.committed_una);
                 if (advanced) agg.committed_una = new_committed;
 
