@@ -892,11 +892,11 @@ private:
             uint32_t eff_wnd = std::min(reno.window_size(), last_known_min_rwnd);
             while (snd_nxt <= total &&
                    snd_nxt < committed + eff_wnd) {
-                if (!send_segment(snd_nxt)) return false;
                 {
                     std::lock_guard<std::mutex> lk(agg.mtx);
                     agg.ack_wnd.add_slot(snd_nxt, /*retrans_id*/1);
                 }
+                if (!send_segment(snd_nxt)) return false;
                 snd_nxt++;
             }
 
