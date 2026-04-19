@@ -264,8 +264,8 @@ struct AckWindow {
         AckSlot& s          = it->second;
         s.retrans_id        = new_retrans_id;
         s.is_retransmit     = true;
-        s.ack_count         = initial_ack_count;
-        s.first_ack_done    = (initial_ack_count > 0);
+        // s.ack_count         = initial_ack_count;
+        // s.first_ack_done    = (initial_ack_count > 0);
         s.dup_ack_count     = 0;
         s.dup_ack_senders.clear();
         s.dupack_window_open = false;
