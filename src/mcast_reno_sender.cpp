@@ -258,14 +258,14 @@ struct AckWindow {
     //   - ack_count and first_ack_done reset -> next ACK with new retrans_id
     //     will be treated as the first ACK and update cwnd.
     //   - dup state cleared → T_agg reopens fresh for the new epoch.
-    void mark_retransmit(uint32_t seq, uint8_t new_retrans_id) {
+    void mark_retransmit(uint32_t seq, uint8_t new_retrans_id, uint32_t initial_ack_count) {
         auto it = slots.find(seq);
         if (it == slots.end()) return;
         AckSlot& s          = it->second;
         s.retrans_id        = new_retrans_id;
         s.is_retransmit     = true;
-        // s.ack_count         = 0;
-        // s.first_ack_done    = false;
+        s.ack_count         = initial_ack_count;
+        s.first_ack_done    = (initial_ack_count > 0);
         s.dup_ack_count     = 0;
         s.dup_ack_senders.clear();
         s.dupack_window_open = false;
@@ -819,7 +819,12 @@ private:
                     auto elapsed_ms =
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             now_tp - slot->dupack_window_start).count();
-                    if (elapsed_ms > (long long)A.tagg_ms) continue; // T_agg expired
+                    if (elapsed_ms > (long long)A.tagg_ms) {
+                        slot->dup_ack_senders.clear();
+                        slot->dup_ack_count       = 0;
+                        slot->dupack_window_start = now_tp;
+                        // fall through to record this sender in the new window
+                    }; // T_agg expired
                 }
 
                 // ── Req 5: record unique sender; check x% threshold ───────────
@@ -846,6 +851,13 @@ private:
     // (RTO reset on commit), req 9 (standard Reno window/ssthresh elsewhere).
     // ════════════════════════════════════════════════════════════════════════
     bool transfer(uint32_t total) {
+        auto already_acked_count = [&](uint32_t seq) -> uint32_t {
+            uint32_t n = 0;
+            for (auto& [k, una] : agg.peer_cum_ack)
+                if (una > seq) n++;
+            return n;
+        };
+
         snd_nxt = 1;
         uint32_t prev_committed  = 1; // tracks snd_una (committed_una at last advance)
         int      consec_timeouts = 0;
@@ -1007,7 +1019,8 @@ private:
                     if (ifit != in_flight.end()) {
                         std::lock_guard<std::mutex> lk2(agg.mtx);
                         agg.ack_wnd.mark_retransmit(new_committed,
-                                                    ifit->second.retrans_id);
+                                                    ifit->second.retrans_id,
+                                                    already_acked_count(new_committed));
                     }
                 } else {
                     std::cerr << "  COMMIT committed=" << new_committed
@@ -1034,7 +1047,8 @@ private:
                     if (ifit != in_flight.end()) {
                         std::lock_guard<std::mutex> lk2(agg.mtx);
                         agg.ack_wnd.mark_retransmit(fast_retransmit_seq,
-                                                    ifit->second.retrans_id);
+                                                    ifit->second.retrans_id,
+                                                    already_acked_count(fast_retransmit_seq));
                     }
                 } else {
                     std::cerr << "  FAST_RETRANSMIT seq=" << fast_retransmit_seq
@@ -1062,7 +1076,8 @@ private:
                 if (ifit != in_flight.end()) {
                     std::lock_guard<std::mutex> lk2(agg.mtx);
                     agg.ack_wnd.mark_retransmit(prev_committed,
-                                                ifit->second.retrans_id);
+                                                ifit->second.retrans_id,
+                                                already_acked_count(prev_committed));
                 }
             }
         }
