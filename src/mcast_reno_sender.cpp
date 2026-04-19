@@ -923,7 +923,7 @@ private:
                 return agg.committed_una   > prev_committed ||
                        agg.first_ack_count > 0             ||
                        agg.fast_retransmit_needed           ||
-                       agg.min_rwnd < last_known_min_rwnd;
+                       agg.min_rwnd != last_known_min_rwnd;
             });
             uint32_t new_committed = agg.committed_una;
             uint32_t current_min_rwnd = agg.min_rwnd;
