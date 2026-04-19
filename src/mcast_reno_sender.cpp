@@ -833,7 +833,8 @@ private:
                     slot->dup_ack_count = (uint32_t)slot->dup_ack_senders.size();
 
                     if (slot->dup_ack_count >= fr_threshold &&
-                        !agg.fast_retransmit_needed) {
+                    !agg.fast_retransmit_needed &&
+                    !slot->is_retransmit) {
                         agg.fast_retransmit_needed = true;
                         agg.fast_retransmit_seq    = peer_prev;
                         agg.cv.notify_all();
