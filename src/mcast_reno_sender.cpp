@@ -749,10 +749,10 @@ private:
                 // received in-order data packet that triggered rcv_nxt to advance).
                 // If that slot still exists and pkt_rid < slot.retrans_id, the ACK
                 // is from a stale epoch — discard.
-                if (cum_ack > 0) {
+                /* if (cum_ack > 0) {
                     const AckSlot* chk = agg.ack_wnd.get(cum_ack - 1);
                     if (chk && pkt_rid < chk->retrans_id) continue; // stale
-                }
+                } */
 
                 // ── Req 1: credit ack_count; detect first-ACK events ──────────
                 uint32_t local_first_acks = 0;
