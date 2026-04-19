@@ -764,6 +764,7 @@ private:
                         slot->ack_count++;
                         if (!slot->first_ack_done) {
                             slot->first_ack_done = true;
+                            local_first_acks++;
                             agg.first_ack_count++;
                         }
                     }
